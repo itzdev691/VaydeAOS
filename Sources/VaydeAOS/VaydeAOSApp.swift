@@ -23,6 +23,7 @@ struct VaydeAOSApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Chat") {
                     session.newChat()
+                    NotificationCenter.default.post(name: .vaydeOpenChat, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: .command)
             }
@@ -46,4 +47,8 @@ final class VaydeAOSAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
+}
+
+extension Notification.Name {
+    static let vaydeOpenChat = Notification.Name("VaydeAOS.openChat")
 }

@@ -11,6 +11,11 @@ struct ChatView: View {
     @FocusState private var composerFocused: Bool
     @State private var workspaceMode = WorkspaceMode.workspace
     @State private var animateNetwork = true
+    @State private var chatPresented = false
+    @State private var lastInteraction = Date()
+    @State private var events = [WorkspaceEvent(title: "Workspace initialized")]
+    @AppStorage("workspace.autoIdle") private var autoIdle = true
+    private let idleTicker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private enum WorkspaceMode: String, CaseIterable {
         case workspace = "WORKSPACE", network = "NETWORK", focus = "FOCUS"
@@ -21,25 +26,49 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 header
                 navigation
-                HStack(alignment: .top, spacing: 12) {
-                    if workspaceMode != .focus {
-                        TelemetrySidebar(telemetry: telemetry)
-                            .frame(width: geometry.size.width < 1250 ? 208 : 238)
-                    }
-                    VStack(spacing: 12) {
+                ZStack {
+                    HStack(alignment: .top, spacing: 12) {
                         if workspaceMode != .focus {
-                            networkPanel
-                                .frame(height: workspaceMode == .network ? max(310, geometry.size.height * 0.53) : max(230, min(310, geometry.size.height * 0.35)))
+                            TelemetrySidebar(telemetry: telemetry)
+                                .frame(width: geometry.size.width < 1250 ? 208 : 238)
                         }
-                        conversationPanel
+                        ScrollView(showsIndicators: false) {
+                            VStack(spacing: 12) {
+                                idleBanner
+                                networkPanel.frame(height: workspaceMode == .network ? 380 : 270)
+                                WorkspaceWidgets(telemetry: telemetry, events: events,
+                                                 interrupt: { openChat(prompt: $0) }, record: record)
+                            }
+                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        if geometry.size.width >= 1250 && workspaceMode != .focus {
+                            SessionSidebar(session: session, telemetry: telemetry, showingConnectionSettings: $showingConnectionSettings)
+                                .frame(width: 238)
+                        }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if geometry.size.width >= 1250 && workspaceMode != .focus {
-                        SessionSidebar(session: session, telemetry: telemetry, showingConnectionSettings: $showingConnectionSettings)
-                            .frame(width: 238)
+                    .padding(16)
+                    .allowsHitTesting(!chatPresented)
+                    .accessibilityHidden(chatPresented)
+                    if chatPresented {
+                        Console.background.opacity(0.78)
+                            .contentShape(Rectangle()).onTapGesture { enterIdle() }
+                        VStack(spacing: 0) {
+                            HStack {
+                                Circle().fill(Console.green).frame(width: 5, height: 5)
+                                Text("INTERRUPT RECEIVED / CHANNEL OPEN").tracking(1.2)
+                                Spacer()
+                                Button { enterIdle() } label: {
+                                    Label("RETURN TO IDLE", systemImage: "arrow.down.right.and.arrow.up.left")
+                                }.buttonStyle(ConsoleButtonStyle()).help("Hide chat; keep the conversation and draft")
+                            }.font(Console.mono(9)).foregroundStyle(Console.blue).padding(14)
+                            conversationPanel
+                        }
+                        .background(Console.panel)
+                        .overlay(Rectangle().strokeBorder(Console.blue.opacity(0.5), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.6), radius: 35, y: 20)
+                        .frame(width: min(820, geometry.size.width - 100), height: max(480, geometry.size.height - 230))
+                        .transition(.opacity.combined(with: .scale(scale: 0.97)))
                     }
                 }
-                .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 footer
             }
@@ -53,17 +82,87 @@ struct ChatView: View {
         .foregroundStyle(Console.text)
         .tint(Console.blue)
         .preferredColorScheme(.dark)
-        .onAppear { composerFocused = true; telemetry.start() }
+        .background(WorkspaceInputMonitor(onActivity: { lastInteraction = Date() }, onTyping: { text in
+            guard !chatPresented, !showingConnectionSettings else { return false }
+            openChat()
+            session.draft += text
+            return true
+        }))
+        .background {
+            Button("Interrupt") { openChat() }.keyboardShortcut("k", modifiers: .command).hidden()
+        }
+        .onExitCommand {
+            if chatPresented {
+                if session.isSending { session.stop() } else { enterIdle() }
+            }
+        }
+        .onReceive(idleTicker) { date in
+            if autoIdle, chatPresented, !showingConnectionSettings, !session.isSending,
+               session.draft.isEmpty, session.errorMessage == nil, date.timeIntervalSince(lastInteraction) >= 60 {
+                enterIdle()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .vaydeOpenChat)) { _ in openChat() }
+        .onAppear {
+            telemetry.start()
+            if session.errorMessage != nil { openChat() }
+        }
         .onDisappear { telemetry.stop() }
         .onChange(of: scenePhase) { phase in
             if phase == .background { telemetry.stop() } else { telemetry.start() }
         }
         .onChange(of: session.isSending) { sending in
-            if !sending && !showingConnectionSettings { composerFocused = true }
+            lastInteraction = Date()
+            record(sending ? "Model request started" : "Model request finished")
+            if !sending { openChat() }
+        }
+        .onChange(of: session.errorMessage) { error in
+            if error != nil { record("Model channel needs attention"); openChat() }
         }
         .onChange(of: showingConnectionSettings) { showing in
-            if !showing { composerFocused = true }
+            if !showing && chatPresented { composerFocused = true }
         }
+    }
+
+    private var idleBanner: some View {
+        HStack(alignment: .center, spacing: 18) {
+            ZStack {
+                Circle().stroke(Console.blue.opacity(0.15), lineWidth: 1).frame(width: 54, height: 54)
+                Circle().stroke(Console.blue.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [2, 5])).frame(width: 42, height: 42)
+                Image(systemName: "waveform.path").font(.system(size: 19, weight: .light)).foregroundStyle(Console.blue)
+            }.accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("SYSTEM AT IDLE").font(Console.mono(21, weight: .light)).tracking(2)
+                Text("Instruments live. Interrupt to open your command channel.")
+                    .font(Console.mono(10)).foregroundStyle(Console.muted)
+            }
+            Spacer(minLength: 0)
+            Toggle("AUTO IDLE", isOn: $autoIdle).toggleStyle(.switch).controlSize(.mini)
+                .font(Console.mono(8)).fixedSize().help("Return to idle after 60 seconds with no input, unsent draft, error, or active request")
+        }
+        .padding(18).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Console.raised.opacity(0.25)).overlay(Rectangle().strokeBorder(Console.line, lineWidth: 1))
+    }
+
+    private func openChat(prompt: String? = nil) {
+        if let prompt {
+            session.draft = session.draft.isEmpty ? prompt : session.draft + "\n\n" + prompt
+        }
+        lastInteraction = Date()
+        if !chatPresented { record("Command channel opened") }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) { chatPresented = true }
+        DispatchQueue.main.async { composerFocused = true }
+    }
+
+    private func enterIdle() {
+        composerFocused = false
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { chatPresented = false }
+        record("Returned to idle")
+    }
+
+    private func record(_ title: String) {
+        events.append(WorkspaceEvent(title: title))
+        if events.count > 40 { events.removeFirst(events.count - 40) }
     }
 
     private var header: some View {
@@ -99,7 +198,7 @@ struct ChatView: View {
     private var navigation: some View {
         HStack(spacing: 0) {
             ForEach(WorkspaceMode.allCases, id: \.self) { mode in
-                Button { workspaceMode = mode } label: {
+                Button { workspaceMode = mode; if mode == .focus { openChat() } } label: {
                     HStack(spacing: 8) {
                         Text(mode == .workspace ? "01" : mode == .network ? "02" : "03").foregroundStyle(Console.muted)
                         Text(mode.rawValue).tracking(1.5)
@@ -113,6 +212,8 @@ struct ChatView: View {
                 .buttonStyle(.plain).accessibilityAddTraits(workspaceMode == mode ? .isSelected : [])
             }
             Spacer()
+            Button { openChat() } label: { Text("INTERRUPT  ⌘K").font(Console.mono(10)) }
+                .buttonStyle(ConsoleButtonStyle()).padding(.trailing, 18)
             Circle().fill(telemetry.isNetworkAvailable ? Console.green : Console.amber).frame(width: 5, height: 5)
             Text(telemetry.pathStatus.uppercased()).font(Console.mono(9)).tracking(1).padding(.leading, 7).padding(.trailing, 20)
         }
@@ -167,7 +268,7 @@ struct ChatView: View {
                 .background(Console.background.opacity(0.45))
                 Group {
                     if session.messages.isEmpty && session.pendingMessage == nil {
-                        if workspaceMode != .network { ScrollView { emptyConversation } }
+                        ScrollView { emptyConversation }
                     } else { transcript }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 composer
@@ -270,7 +371,7 @@ struct ChatView: View {
             Text("VAYDE AOS").tracking(1)
             Text("/  NATIVE CONSOLE").foregroundStyle(Console.muted)
             Spacer()
-            Text(session.isSending ? "MODEL REQUEST IN PROGRESS" : "AWAITING INPUT").foregroundStyle(session.isSending ? Console.amber : Console.muted)
+            Text(session.isSending ? "MODEL REQUEST IN PROGRESS" : chatPresented ? "CHANNEL OPEN" : "IDLE / TYPE TO INTERRUPT").foregroundStyle(session.isSending ? Console.amber : Console.muted)
             Rectangle().fill(Console.line).frame(width: 1, height: 10).padding(.horizontal, 8)
             Text("TELEMETRY \(telemetry.lastUpdated == nil ? "INITIALIZING" : "LIVE")").foregroundStyle(Console.blue)
         }

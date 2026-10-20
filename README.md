@@ -46,8 +46,20 @@ The current experimental palette uses the live VaydeNet site's
 blue `#60a5fa` / `#1d4ed8`, and red `#ff4c5b`. Green remains a status color.
 The palette is centralized in `ConsoleTheme.swift`, including the globe and settings.
 
-- **Workspace** combines the network observatory, model chat, and side instruments.
-- **Network** expands the globe; **Focus** gives the conversation the full workspace.
+- **Workspace** starts at idle with live instruments and four additional widgets:
+  a CPU/RX/TX signal inspector, focus timer with 5/15/25/50-minute presets,
+  locally saved scratchpad, and a timestamped session activity log.
+- **Interrupt**, **Command-K**, or typing outside a text editor opens a floating
+  chat panel. Input monitoring is limited to this app's window.
+- **Return to Idle** or **Escape** hides chat without discarding its draft or history.
+  During a request, Escape stops the response first. A completed request or error
+  reopens the channel if it was hidden.
+- **Auto Idle** returns chat to the dashboard after 60 seconds without keyboard,
+  click, or scroll input, only when there is no draft, request, error, or settings sheet.
+- Scratchpad **Edit/Done** controls editing; **To Chat** appends notes to the draft
+  without sending them. Notes and the Auto Idle preference use local UserDefaults.
+  The focus timer and activity log last for the current app session.
+- **Network** expands the globe; **Focus** opens chat and hides the side columns.
 - CPU, active/wired/compressed memory, uptime, interface addresses, and primary
   interface traffic come from local macOS APIs. Samples refresh once per second.
 - Traffic plots retain up to 60 observed samples and scale independently. They
