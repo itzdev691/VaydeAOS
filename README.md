@@ -1,19 +1,22 @@
 # VaydeAOS
 
-Base project for VaydeAOS.
+A minimal native macOS app base built with Swift and SwiftUI.
 
-The first example is a native macOS SwiftUI app that opens a window displaying
-`Hello, world!`.
+The [Hello World example](examples/hello-world/) opens a single window displaying
+`Hello, world!`. A shell script compiles the source into a standard macOS `.app`
+bundle.
 
 ## Build and run
 
-Requires macOS 11 or later and Apple's Xcode Command Line Tools
+Requires macOS 11 or later and Xcode Command Line Tools
 (`xcode-select --install`).
 
+From the repository root:
+
 ```sh
-cd examples/hello-world
-./build.sh
-open build/HelloWorld.app
+./examples/hello-world/build.sh
+open examples/hello-world/build/HelloWorld.app
 ```
 
-See the [Hello World example](examples/hello-world/README.md) for details.
+The example includes its SwiftUI source, app metadata, and build script.
+Generated build files are ignored by Git.
