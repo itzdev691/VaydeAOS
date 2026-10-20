@@ -67,6 +67,13 @@ macOS Keychain, scoped to the API base URL. Changing the endpoint does not copy
 the previous endpoint's key. The app sends conversation text only when **Send**
 is used; selecting a remote API sends the current conversation to that server.
 
+If Keychain access fails, **Use Key for This Session** applies the entered key
+without reading or writing Keychain. The key stays in memory until the app quits;
+only the endpoint and model are saved to disk. Existing Keychain entries remain
+unchanged and are used again after restarting. This option also appears when
+editing an endpoint that already uses a session key. **Save** still attempts to
+store the key in Keychain.
+
 This version provides text chat. File access, Obsidian retrieval, and agent tools
 remain outside the implemented interface.
 

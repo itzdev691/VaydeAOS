@@ -303,6 +303,86 @@ final class ChatSessionTests {
         #expect(session.notice == nil)
     }
 
+    @Test
+    func testSessionKeySendsWhenKeychainIsUnavailableWithoutPersistingSecret() async throws {
+        let client = ControlledChatClient()
+        let credentials = RecordingCredentials()
+        credentials.failLoading = true
+        credentials.failSaving = true
+        let session = makeSession(client: client, credentials: credentials)
+        let settings = ConnectionSettings(baseURL: "https://api.example.com/v1/", model: "model")
+        try session.saveSettings(settings, apiKey: "  session-secret\n", rememberAPIKey: false)
+        #expect(session.usesSessionAPIKey(for: settings))
+        #expect(credentials.loadedEndpoint == nil)
+        #expect(credentials.savedEndpoint == nil)
+        #expect(session.notice?.contains("until you quit") == true)
+        let saved = try String(contentsOf: directory.appendingPathComponent("settings.json"), encoding: .utf8)
+        #expect(!saved.contains("session-secret"))
+
+        session.draft = "Question"
+        session.send()
+        let task = try #require(session.sendTask)
+        try await waitForRequests(1, client: client)
+        let requests = await client.requests
+        #expect(requests[0].apiKey == "session-secret")
+        await client.succeed(at: 0, with: "Answer")
+        await task.value
+        #expect(credentials.loadedEndpoint == nil)
+
+        let restarted = makeSession(client: ControlledChatClient(), credentials: credentials)
+        #expect(!restarted.usesSessionAPIKey(for: settings))
+        #expect(throws: (any Error).self) { try restarted.apiKey(for: settings) }
+    }
+
+    @Test
+    func testSessionKeyIsScopedToNormalizedEndpointAndPreservesSavedKey() throws {
+        let credentials = RecordingCredentials()
+        credentials.value = "existing-key"
+        let session = makeSession(client: ControlledChatClient(), credentials: credentials)
+        let endpoint = ConnectionSettings(baseURL: "https://API.example.com:443/v1/", model: "model")
+        let normalized = try endpoint.validated()
+        try session.saveSettings(endpoint, apiKey: "session-key", rememberAPIKey: false)
+        #expect(try session.apiKey(for: normalized) == "session-key")
+        #expect(try session.apiKey(for: .local) == "existing-key")
+        #expect(credentials.value == "existing-key")
+
+        // An explicit blank session key must not fall back to a stored credential.
+        try session.saveSettings(normalized, apiKey: "", rememberAPIKey: false)
+        #expect(try session.apiKey(for: endpoint) == nil)
+        #expect(credentials.value == "existing-key")
+    }
+
+    @Test
+    func testSessionKeySurvivesFailedKeychainSaveAndClearsAfterSuccessfulSave() throws {
+        let credentials = RecordingCredentials()
+        let session = makeSession(client: ControlledChatClient(), credentials: credentials)
+        try session.saveSettings(.local, apiKey: "session-key", rememberAPIKey: false)
+        credentials.failSaving = true
+        #expect(throws: (any Error).self) { try session.saveSettings(.local, apiKey: "persistent-key") }
+        #expect(try session.apiKey(for: .local) == "session-key")
+        #expect(session.notice == nil)
+
+        credentials.failSaving = false
+        try session.saveSettings(.local, apiKey: "persistent-key")
+        #expect(!session.usesSessionAPIKey(for: .local))
+        #expect(try session.apiKey(for: .local) == "persistent-key")
+        #expect(credentials.value == "persistent-key")
+    }
+
+    @Test
+    func testFailedSettingsWriteDoesNotActivateSessionKey() throws {
+        let credentials = RecordingCredentials()
+        credentials.value = "existing-key"
+        let session = makeSession(client: ControlledChatClient(), credentials: credentials)
+        try Data("blocks storage".utf8).write(to: directory)
+        #expect(throws: (any Error).self) {
+            try session.saveSettings(.local, apiKey: "session-key", rememberAPIKey: false)
+        }
+        #expect(!session.usesSessionAPIKey(for: .local))
+        #expect(try session.apiKey(for: .local) == "existing-key")
+        #expect(session.notice == nil)
+    }
+
     private func makeSession(client: ControlledChatClient, credentials: RecordingCredentials = RecordingCredentials()) -> ChatSession {
         ChatSession(client: client, store: LocalStore(directory: directory), credentials: credentials)
     }
@@ -357,9 +437,11 @@ private final class RecordingCredentials: CredentialStoring {
     var savedEndpoint: String?
     var loadedEndpoint: String?
     var failSaving = false
+    var failLoading = false
 
     func load(for endpoint: String) throws -> String? {
         loadedEndpoint = endpoint
+        if failLoading { throw TestFailure.failed }
         return value
     }
 

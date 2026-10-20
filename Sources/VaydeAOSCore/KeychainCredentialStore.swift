@@ -44,7 +44,6 @@ public struct KeychainCredentialStore: CredentialStoring {
         var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
             query[kSecValueData as String] = data
-            query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             status = SecItemAdd(query as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw CredentialStoreError.keychain(status) }
@@ -57,6 +56,9 @@ public struct KeychainCredentialStore: CredentialStoring {
         ).validated().baseURL
 
         return [
+            // This local macOS build uses the login Keychain and its access controls.
+            // Data Protection Keychain attributes require a provisioned app identity.
+            kSecUseDataProtectionKeychain as String: false,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
             kSecAttrAccount as String: normalizedEndpoint
@@ -70,9 +72,13 @@ public enum CredentialStoreError: LocalizedError, Equatable, Sendable {
 
     public var errorDescription: String? {
         switch self {
+        case .keychain(errSecAuthFailed):
+            return "macOS denied access to the login Keychain (error \(errSecAuthFailed)). This does not mean the API key is invalid. Restore access in Keychain Access, or use the key for this session."
+        case .keychain(errSecMissingEntitlement):
+            return "This app's signing configuration does not permit the requested Keychain access (error \(errSecMissingEntitlement)). Use the key for this session."
         case .keychain(let status):
             let reason = SecCopyErrorMessageString(status, nil) as String?
-            return "Could not access the API key in Keychain: \(reason ?? "error \(status)")."
+            return "Could not access the API key in Keychain (error \(status)): \(reason ?? "Unknown Keychain error")"
         case .unreadableValue:
             return "The saved API key could not be read from Keychain. Save it again."
         }

@@ -10,6 +10,7 @@ struct ConnectionSettingsView: View {
     @State private var errorMessage: String?
     @State private var credentialEndpoint: String?
     @State private var endpointChanged = false
+    @State private var keychainFailed = false
     @FocusState private var focusedField: Field?
 
     private let background = Console.background
@@ -109,6 +110,19 @@ struct ConnectionSettingsView: View {
                 .accessibilityLabel("Settings error: \(errorMessage)")
             }
 
+            if keychainFailed || session.usesSessionAPIKey(for: ConnectionSettings(baseURL: baseURL, model: model)) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Button("Use Key for This Session") {
+                        save(rememberAPIKey: false)
+                    }
+                    .buttonStyle(ConnectionButtonStyle(accent: accent))
+                    Text("Keeps the entered key in memory until you quit. Existing Keychain entries are unchanged.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             HStack {
                 Button("Use Local Defaults") {
                     baseURL = ConnectionSettings.local.baseURL
@@ -144,6 +158,7 @@ struct ConnectionSettingsView: View {
             apiKey = ""
             credentialEndpoint = nil
             endpointChanged = true
+            keychainFailed = false
             errorMessage = nil
         }
         .onChange(of: focusedField) { field in
@@ -187,6 +202,7 @@ struct ConnectionSettingsView: View {
             do {
                 try loadCredentialIfNeeded(for: settings)
             } catch {
+                keychainFailed = error is CredentialStoreError
                 errorMessage = "Could not read the saved API key: \(error.localizedDescription)"
             }
         } catch {
@@ -201,16 +217,20 @@ struct ConnectionSettingsView: View {
         apiKey = ""
         apiKey = try session.apiKey(for: settings) ?? ""
         credentialEndpoint = settings.baseURL
+        keychainFailed = false
         errorMessage = nil
     }
 
-    private func save() {
+    private func save(rememberAPIKey: Bool = true) {
         do {
             let settings = try ConnectionSettings(baseURL: baseURL, model: model).validated()
-            try loadCredentialIfNeeded(for: settings)
-            try session.saveSettings(settings, apiKey: apiKey)
+            if rememberAPIKey {
+                try loadCredentialIfNeeded(for: settings)
+            }
+            try session.saveSettings(settings, apiKey: apiKey, rememberAPIKey: rememberAPIKey)
             dismiss()
         } catch {
+            keychainFailed = error is CredentialStoreError
             errorMessage = error.localizedDescription
         }
     }

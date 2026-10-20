@@ -20,6 +20,8 @@ public final class ChatSession: ObservableObject {
     private var activeRequest: ActiveRequest?
     private var settingsLoadIssue: String?
     private var messagesLoadIssue: String?
+    // Never serialized. An empty value explicitly overrides a saved key.
+    private var sessionAPIKeys: [String: String] = [:]
 
     private struct ActiveRequest {
         let id: UUID
@@ -139,19 +141,41 @@ public final class ChatSession: ObservableObject {
 
     public func apiKey(for settings: ConnectionSettings) throws -> String? {
         let connection = try settings.validated()
+        if let key = sessionAPIKeys[connection.baseURL] {
+            return key.isEmpty ? nil : key
+        }
         return try credentials.load(for: connection.baseURL)
     }
 
-    public func saveSettings(_ settings: ConnectionSettings, apiKey: String) throws {
+    public func usesSessionAPIKey(for settings: ConnectionSettings) -> Bool {
+        guard let connection = try? settings.validated() else { return false }
+        return sessionAPIKeys[connection.baseURL] != nil
+    }
+
+    public func saveSettings(
+        _ settings: ConnectionSettings,
+        apiKey: String,
+        rememberAPIKey: Bool = true
+    ) throws {
         notice = nil
         guard !isSending else { throw SessionError.requestInProgress }
         let connection = try settings.validated()
-        try credentials.save(apiKey.trimmingCharacters(in: .whitespacesAndNewlines), for: connection.baseURL)
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if rememberAPIKey {
+            try credentials.save(key, for: connection.baseURL)
+        }
         try store.saveSettings(connection)
+        if rememberAPIKey {
+            sessionAPIKeys.removeValue(forKey: connection.baseURL)
+        } else {
+            sessionAPIKeys[connection.baseURL] = key
+        }
         self.settings = connection
         settingsLoadIssue = nil
         errorMessage = messagesLoadIssue
-        notice = "Settings saved."
+        notice = rememberAPIKey
+            ? "Settings saved."
+            : "Settings saved. The API key is held only until you quit this app; existing Keychain entries are unchanged."
     }
 
     private var loadIssues: String? {
