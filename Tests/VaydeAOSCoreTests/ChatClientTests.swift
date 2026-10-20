@@ -77,13 +77,62 @@ final class ChatClientTests {
             (401, ChatClientError.authenticationFailed(401)),
             (403, .authenticationFailed(403)),
             (404, .httpStatus(404)),
-            (429, .httpStatus(429)),
+            (429, .unclassifiedLimit),
             (500, .httpStatus(500))
         ] {
             let client = makeClient { _ in .response(status, Data()) }
             await assertError(expected, client: client)
             #expect(!(expected.localizedDescription.isEmpty))
         }
+    }
+
+    @Test func testQuotaErrorsAreDistinctFromTemporaryRateLimits() async throws {
+        for (code, expected) in [
+            ("credit_balance_exhausted", ChatClientError.creditsExhausted),
+            ("organization_spend_limit_exceeded", .spendLimitExceeded),
+            ("project_spend_limit_exceeded", .spendLimitExceeded),
+            ("organization_usage_limit_exceeded", .usageLimitExceeded),
+            ("insufficient_quota", .quotaExceeded),
+            ("usage_limit_exceeded", .quotaExceeded),
+            ("unknown_future_code", .quotaExceeded)
+        ] {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "error": ["code": code, "type": "insufficient_quota", "message": "private-request-content"]
+            ])
+            let client = makeClient { _ in .response(429, data, ["Retry-After": "10"]) }
+            await assertError(expected, client: client)
+            #expect(!expected.localizedDescription.contains("private-request-content"))
+            #expect(!expected.localizedDescription.contains("Wait at least"))
+        }
+    }
+
+    @Test func testRateLimitsUseValidRetryDelay() async {
+        for code in ["rate_limit_exceeded", "slow_down"] {
+            for (header, delay) in [
+                ("12", Optional(12)), ("0", Optional(0)), ("-1", nil),
+                ("invalid", nil), ("999999999999999999999999999", nil)
+            ] {
+                let data = Data("{\"error\":{\"code\":\"\(code)\",\"type\":\"rate_limit_error\"}}".utf8)
+                let client = makeClient { _ in .response(429, data, ["Retry-After": header]) }
+                await assertError(.rateLimited(retryAfterSeconds: delay), client: client)
+            }
+        }
+        let client = makeClient { _ in
+            .response(429, Data("{\"error\":{\"code\":null,\"type\":\"rate_limit_error\"}}".utf8))
+        }
+        await assertError(.rateLimited(retryAfterSeconds: nil), client: client)
+    }
+
+    @Test func testUnknown429DoesNotInventAReasonOrExposeProviderText() async {
+        for body in [
+            "", "not JSON", "{}",
+            "{\"error\":{\"code\":123,\"message\":\"private-request-content\"}}",
+            "{\"error\":{\"code\":\"future_code\",\"type\":\"future_type\"}}"
+        ] {
+            let client = makeClient { _ in .response(429, Data(body.utf8), ["Retry-After": "10"]) }
+            await assertError(.unclassifiedLimit, client: client)
+        }
+        #expect(!ChatClientError.unclassifiedLimit.localizedDescription.contains("private-request-content"))
     }
 
     @Test func testMalformedResponsesAreRejected() async {
@@ -230,7 +279,7 @@ final class ChatClientTests {
 
 private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     enum Result {
-        case response(Int, Data)
+        case response(Int, Data, [String: String] = [:])
         case redirect(URL)
         case pending
     }
@@ -274,12 +323,12 @@ private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
                 client?.urlProtocol(self, wasRedirectedTo: redirect, redirectResponse: response)
                 client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                 client?.urlProtocolDidFinishLoading(self)
-            case .response(let status, let data):
+            case .response(let status, let data, let headers):
                 let response = HTTPURLResponse(
                     url: request.url!,
                     statusCode: status,
                     httpVersion: "HTTP/1.1",
-                    headerFields: ["Content-Type": "application/json"]
+                    headerFields: headers.merging(["Content-Type": "application/json"]) { _, new in new }
                 )!
                 client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                 client?.urlProtocol(self, didLoad: data)

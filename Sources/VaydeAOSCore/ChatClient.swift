@@ -85,6 +85,8 @@ public struct ChatClient: ChatServing {
             break
         case 401, 403:
             throw ChatClientError.authenticationFailed(httpResponse.statusCode)
+        case 429:
+            throw Self.limitError(data: data, response: httpResponse)
         default:
             throw ChatClientError.httpStatus(httpResponse.statusCode)
         }
@@ -101,6 +103,34 @@ public struct ChatClient: ChatServing {
             throw ChatClientError.emptyResponse
         }
         return content
+    }
+
+    private static func limitError(data: Data, response: HTTPURLResponse) -> ChatClientError {
+        // Read only structured codes. Provider messages may echo request content or credentials.
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let error = object?["error"] as? [String: Any]
+        let code = error?["code"] as? String
+        let type = error?["type"] as? String
+        switch code {
+        case "credit_balance_exhausted":
+            return .creditsExhausted
+        case "organization_spend_limit_exceeded", "project_spend_limit_exceeded":
+            return .spendLimitExceeded
+        case "organization_usage_limit_exceeded":
+            return .usageLimitExceeded
+        case "insufficient_quota", "usage_limit_exceeded":
+            return .quotaExceeded
+        default:
+            break
+        }
+        if type == "insufficient_quota" { return .quotaExceeded }
+        if code == "rate_limit_exceeded" || code == "slow_down" || type == "rate_limit_error" {
+            let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
+                .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                .flatMap { $0 >= 0 ? $0 : nil }
+            return .rateLimited(retryAfterSeconds: retryAfter)
+        }
+        return .unclassifiedLimit
     }
 }
 
@@ -129,6 +159,12 @@ public enum ChatClientError: LocalizedError, Equatable, Sendable {
     case invalidAPIKey
     case authenticationFailed(Int)
     case httpStatus(Int)
+    case creditsExhausted
+    case spendLimitExceeded
+    case usageLimitExceeded
+    case quotaExceeded
+    case rateLimited(retryAfterSeconds: Int?)
+    case unclassifiedLimit
     case timedOut
     case networkUnavailable
     case networkFailure
@@ -143,6 +179,21 @@ public enum ChatClientError: LocalizedError, Equatable, Sendable {
             return "The API rejected authentication (HTTP \(status)). Check the saved API key."
         case .httpStatus(let status):
             return "The API returned HTTP \(status). Check the base URL, model, and server status."
+        case .creditsExhausted:
+            return "API credits are exhausted (HTTP 429). Add credits in the API provider's billing settings before retrying."
+        case .spendLimitExceeded:
+            return "An API project or organization spend limit was reached (HTTP 429). Check the provider's billing and spending limits before retrying."
+        case .usageLimitExceeded:
+            return "The organization's API usage limit was reached (HTTP 429). Check the provider's usage limits before retrying."
+        case .quotaExceeded:
+            return "API quota is unavailable or exhausted (HTTP 429). Check API billing, credits, and usage limits. Repeated retries will not restore quota."
+        case .rateLimited(let seconds):
+            if let seconds {
+                return "The API rate limit was reached (HTTP 429). Wait at least \(seconds) seconds before retrying."
+            }
+            return "The API rate limit was reached (HTTP 429). Wait before retrying and reduce request frequency or conversation size."
+        case .unclassifiedLimit:
+            return "The API returned HTTP 429 without a recognized error code. This may be a temporary rate limit or exhausted quota. Check the provider's API billing and limits."
         case .timedOut:
             return "The API request timed out. The model may still be loading."
         case .networkUnavailable:
