@@ -41,6 +41,31 @@ final class ChatClientTests {
         #expect(reply == "The answer")
     }
 
+    @Test func testMeasuredReplyPreservesProviderTokenUsage() async throws {
+        let client = makeClient { _ in
+            .response(200, Data(#"{"choices":[{"message":{"content":"Measured reply"}}],"usage":{"prompt_tokens":500,"completion_tokens":120,"total_tokens":620}}"#.utf8))
+        }
+        let result = try await client.measuredReply(to: [], settings: .local, apiKey: nil)
+        #expect(result.content == "Measured reply")
+        #expect(result.inputTokens == 500)
+        #expect(result.outputTokens == 120)
+    }
+
+    @Test func testMissingOrInvalidUsageDoesNotDiscardValidReplies() async throws {
+        for usage in ["null", "[]", "{}", "false", #"{"prompt_tokens":-1,"completion_tokens":"invalid"}"#] {
+            let body = #"{"choices":[{"message":{"content":"Usable answer"}}],"usage":\#(usage)}"#
+            let client = makeClient { _ in .response(200, Data(body.utf8)) }
+            let result = try await client.measuredReply(to: [], settings: .local, apiKey: nil)
+            #expect(result.content == "Usable answer")
+            #expect(result.inputTokens == nil)
+            #expect(result.outputTokens == nil)
+        }
+        let client = makeClient { _ in .response(200, Self.replyData("No usage supplied")) }
+        let result = try await client.measuredReply(to: [], settings: .local, apiKey: nil)
+        #expect(result.inputTokens == nil)
+        #expect(result.outputTokens == nil)
+    }
+
     @Test func testRemoteRequestUsesNormalizedURLAndOptionalBearerKey() async throws {
         let client = makeClient { request in
             #expect(request.url?.absoluteString == "https://api.example.com/v1/chat/completions")

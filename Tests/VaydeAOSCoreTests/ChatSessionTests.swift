@@ -62,6 +62,8 @@ final class ChatSessionTests {
         #expect(!(session.isSending))
         #expect(session.errorMessage != nil)
         #expect(session.canSend)
+        #expect(session.performanceHistory.map(\.outcome) == [.failed])
+        #expect(session.performanceHistory.first?.outputTokensPerWallSecond == nil)
     }
 
     @Test
@@ -97,6 +99,9 @@ final class ChatSessionTests {
         await currentTask.value
         #expect(session.messages.map(\.content) == ["New prompt", "Current answer"])
         #expect(!(session.isSending))
+        #expect(session.performanceHistory.map(\.outcome) == [.cancelled, .success])
+        #expect(session.performanceHistory.allSatisfy { $0.elapsed >= 0 })
+        #expect(session.performanceRequestStartedAt == nil)
     }
 
     @Test
@@ -111,6 +116,8 @@ final class ChatSessionTests {
 
         let requests = await client.requests
         #expect(requests.isEmpty)
+        #expect(session.performanceHistory.isEmpty)
+        #expect(session.performanceRequestStartedAt == nil)
         #expect(session.draft == "Stop before the request starts")
         #expect(session.errorMessage == nil)
         #expect(session.canSend)
@@ -383,6 +390,46 @@ final class ChatSessionTests {
         #expect(session.notice == nil)
     }
 
+    @Test func testPerformanceReceivesUsageAndUsesEndToEndTime() async throws {
+        let session = ChatSession(client: UsageChatClient(), store: LocalStore(directory: directory),
+                                  credentials: RecordingCredentials())
+        session.draft = "Measure a request"
+        session.send()
+        let task = try #require(session.sendTask)
+        await task.value
+        let record = try #require(session.performanceHistory.first)
+        #expect(record.outcome == .success)
+        #expect(record.inputTokens == 10)
+        #expect(record.outputTokens == 20)
+        #expect(record.elapsed > 0)
+        #expect(record.outputTokensPerWallSecond == 20 / record.elapsed)
+        #expect(session.messages.last?.content == "Measured answer")
+        #expect(session.performanceRequestStartedAt == nil)
+        let relaunched = ChatSession(client: UsageChatClient(), store: LocalStore(directory: directory),
+                                     credentials: RecordingCredentials())
+        #expect(relaunched.performanceHistory.isEmpty)
+    }
+
+    @Test func testPerformanceHistoryIsBoundedAndScopedToConnection() async throws {
+        let client = ControlledChatClient()
+        let session = makeSession(client: client)
+        for index in 0..<62 {
+            session.draft = "Request \(index)"
+            session.send()
+            let task = try #require(session.sendTask)
+            try await waitForRequests(index + 1, client: client)
+            await client.succeed(at: index, with: "Answer")
+            await task.value
+        }
+        #expect(session.performanceHistory.count == 60)
+        #expect(Set(session.performanceHistory.map(\.id)).count == 60)
+        #expect(session.performanceHistory.allSatisfy { $0.outcome == .success && $0.outputTokens == nil })
+        var changed = session.settings
+        changed.model = "another-model"
+        try session.saveSettings(changed, apiKey: "", rememberAPIKey: false)
+        #expect(session.performanceHistory.isEmpty)
+    }
+
     private func makeSession(client: ControlledChatClient, credentials: RecordingCredentials = RecordingCredentials()) -> ChatSession {
         ChatSession(client: client, store: LocalStore(directory: directory), credentials: credentials)
     }
@@ -454,4 +501,13 @@ private final class RecordingCredentials: CredentialStoring {
 
 private enum TestFailure: Error {
     case failed
+}
+
+private struct UsageChatClient: ChatServing {
+    func reply(to messages: [ChatMessage], settings: ConnectionSettings, apiKey: String?) async throws -> String {
+        "Measured answer"
+    }
+    func measuredReply(to messages: [ChatMessage], settings: ConnectionSettings, apiKey: String?) async throws -> ChatReply {
+        ChatReply(content: "Measured answer", inputTokens: 10, outputTokens: 20)
+    }
 }

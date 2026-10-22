@@ -6,6 +6,14 @@ public protocol ChatServing: Sendable {
         settings: ConnectionSettings,
         apiKey: String?
     ) async throws -> String
+
+    func measuredReply(to messages: [ChatMessage], settings: ConnectionSettings, apiKey: String?) async throws -> ChatReply
+}
+
+public extension ChatServing {
+    func measuredReply(to messages: [ChatMessage], settings: ConnectionSettings, apiKey: String?) async throws -> ChatReply {
+        ChatReply(content: try await reply(to: messages, settings: settings, apiKey: apiKey))
+    }
 }
 
 public struct ChatClient: ChatServing {
@@ -20,6 +28,10 @@ public struct ChatClient: ChatServing {
         settings: ConnectionSettings,
         apiKey: String?
     ) async throws -> String {
+        try await measuredReply(to: messages, settings: settings, apiKey: apiKey).content
+    }
+
+    public func measuredReply(to messages: [ChatMessage], settings: ConnectionSettings, apiKey: String?) async throws -> ChatReply {
         try Task.checkCancellation()
         let settings = try settings.validated()
         guard let endpoint = URL(string: settings.baseURL + "/chat/completions") else {
@@ -102,7 +114,8 @@ public struct ChatClient: ChatServing {
               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ChatClientError.emptyResponse
         }
-        return content
+        return ChatReply(content: content, inputTokens: completion.usage?.promptTokens,
+                         outputTokens: completion.usage?.completionTokens)
     }
 
     private static func limitError(data: Data, response: HTTPURLResponse) -> ChatClientError {
@@ -221,6 +234,28 @@ private struct RequestMessage: Encodable {
 
 private struct CompletionResponse: Decodable {
     let choices: [Choice]
+    let usage: Usage?
+
+    private enum CodingKeys: String, CodingKey { case choices, usage }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        choices = try container.decode([Choice].self, forKey: .choices)
+        // Optional telemetry must never discard an otherwise valid reply.
+        usage = try? container.decode(Usage.self, forKey: .usage)
+    }
+
+    struct Usage: Decodable {
+        let promptTokens: Int?
+        let completionTokens: Int?
+        private enum CodingKeys: String, CodingKey {
+            case promptTokens = "prompt_tokens", completionTokens = "completion_tokens"
+        }
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            promptTokens = (try? container.decode(Int.self, forKey: .promptTokens)).flatMap { $0 >= 0 ? $0 : nil }
+            completionTokens = (try? container.decode(Int.self, forKey: .completionTokens)).flatMap { $0 >= 0 ? $0 : nil }
+        }
+    }
 
     struct Choice: Decodable {
         let message: Message

@@ -10,6 +10,9 @@ public final class ChatSession: ObservableObject {
     @Published public private(set) var pendingMessage: ChatMessage?
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var notice: String?
+    @Published public private(set) var performanceHistory: [RequestPerformance] = []
+    /// Monotonic start time; nil until client work actually starts.
+    @Published public private(set) var performanceRequestStartedAt: TimeInterval?
 
     // Internal so tests can await the exact request, including a cancelled request.
     private(set) var sendTask: Task<Void, Never>?
@@ -89,10 +92,12 @@ public final class ChatSession: ObservableObject {
         sendTask = Task { [weak self, client] in
             do {
                 try Task.checkCancellation()
-                let response = try await client.reply(to: conversation, settings: connection, apiKey: apiKey)
+                guard self?.activeRequest?.id == request.id else { return }
+                self?.performanceRequestStartedAt = ProcessInfo.processInfo.systemUptime
+                let response = try await client.measuredReply(to: conversation, settings: connection, apiKey: apiKey)
                 if Task.isCancelled {
                     self?.finishCancellation(request.id)
-                } else if response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                } else if response.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self?.finishFailure(request.id, description: "The model returned an empty response.")
                 } else {
                     self?.finishSuccess(request.id, response: response)
@@ -114,6 +119,7 @@ public final class ChatSession: ObservableObject {
     public func stop() {
         guard let request = activeRequest else { return }
         sendTask?.cancel()
+        recordPerformance(outcome: .cancelled)
         clearActiveRequest()
         draft = request.originalDraft
         errorMessage = nil
@@ -122,6 +128,7 @@ public final class ChatSession: ObservableObject {
 
     public func newChat() {
         sendTask?.cancel()
+        recordPerformance(outcome: .cancelled)
         clearActiveRequest()
         draft = ""
         messages = []
@@ -170,6 +177,7 @@ public final class ChatSession: ObservableObject {
         } else {
             sessionAPIKeys[connection.baseURL] = key
         }
+        if self.settings != connection { performanceHistory = [] }
         self.settings = connection
         settingsLoadIssue = nil
         errorMessage = messagesLoadIssue
@@ -183,10 +191,11 @@ public final class ChatSession: ObservableObject {
         return issues.isEmpty ? nil : issues.joined(separator: "\n\n")
     }
 
-    private func finishSuccess(_ id: UUID, response: String) {
+    private func finishSuccess(_ id: UUID, response: ChatReply) {
         guard let request = activeRequest, request.id == id else { return }
         messages.append(request.message)
-        messages.append(ChatMessage(role: .assistant, content: response))
+        messages.append(ChatMessage(role: .assistant, content: response.content))
+        recordPerformance(outcome: .success, reply: response)
         clearActiveRequest()
         do {
             try store.saveMessages(messages)
@@ -197,6 +206,7 @@ public final class ChatSession: ObservableObject {
 
     private func finishFailure(_ id: UUID, description: String) {
         guard let request = activeRequest, request.id == id else { return }
+        recordPerformance(outcome: .failed)
         clearActiveRequest()
         draft = request.originalDraft
         errorMessage = "Could not send message: \(description)"
@@ -204,13 +214,23 @@ public final class ChatSession: ObservableObject {
 
     private func finishCancellation(_ id: UUID) {
         guard let request = activeRequest, request.id == id else { return }
+        recordPerformance(outcome: .cancelled)
         clearActiveRequest()
         draft = request.originalDraft
         errorMessage = nil
         notice = "Generation stopped. Your message is ready to send again."
     }
 
+    private func recordPerformance(outcome: RequestPerformance.Outcome, reply: ChatReply? = nil) {
+        guard let request = activeRequest, let start = performanceRequestStartedAt else { return }
+        performanceHistory.append(RequestPerformance(id: request.id,
+            elapsed: ProcessInfo.processInfo.systemUptime - start,
+            inputTokens: reply?.inputTokens, outputTokens: reply?.outputTokens, outcome: outcome))
+        if performanceHistory.count > 60 { performanceHistory.removeFirst(performanceHistory.count - 60) }
+    }
+
     private func clearActiveRequest() {
+        performanceRequestStartedAt = nil
         activeRequest = nil
         pendingMessage = nil
         isSending = false
