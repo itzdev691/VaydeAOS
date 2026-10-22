@@ -8,9 +8,10 @@ struct ChatView: View {
     @StateObject private var telemetry = SystemTelemetry()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.workspaceBootReady) private var bootReady
+    @State private var bootStep = 0
     @FocusState private var composerFocused: Bool
     @State private var workspaceMode = WorkspaceMode.workspace
-    @State private var animateNetwork = true
     @State private var chatPresented = false
     @State private var lastInteraction = Date()
     @State private var events = [WorkspaceEvent(title: "Workspace initialized")]
@@ -24,53 +25,53 @@ struct ChatView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                header
-                navigation
-                ZStack {
-                    HStack(alignment: .top, spacing: 12) {
-                        if workspaceMode != .focus {
-                            TelemetrySidebar(telemetry: telemetry)
-                                .frame(width: geometry.size.width < 1250 ? 208 : 238)
-                        }
+                header.workspaceBoot(stage: 0, label: "DISPLAY")
+                navigation.workspaceBoot(stage: 1, label: "NAVIGATION")
+                HStack(alignment: .top, spacing: 12) {
+                    if workspaceMode != .focus {
+                        TelemetrySidebar(telemetry: telemetry)
+                            .workspaceBoot(stage: 2, label: "HOST INSTRUMENTS")
+                            .frame(width: geometry.size.width < 1250 ? 208 : 238)
+                    }
+                    ZStack {
+                        // Keep the dashboard mounted so timers and widget state survive chat.
                         ScrollView(showsIndicators: false) {
                             VStack(spacing: 12) {
-                                idleBanner
-                                networkPanel.frame(height: workspaceMode == .network ? 380 : 270)
+                                idleBanner.workspaceBoot(stage: 3, label: "WORKSPACE")
+                                activityGraphPanel.frame(height: workspaceMode == .network ? 300 : 230)
                                 WorkspaceWidgets(telemetry: telemetry, events: events,
                                                  interrupt: { openChat(prompt: $0) }, record: record)
                             }
                         }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                        if geometry.size.width >= 1250 && workspaceMode != .focus {
-                            SessionSidebar(session: session, telemetry: telemetry, showingConnectionSettings: $showingConnectionSettings)
-                                .frame(width: 238)
+                        .opacity(chatPresented ? 0 : 1)
+                        .allowsHitTesting(!chatPresented)
+                        .accessibilityHidden(chatPresented)
+                        if chatPresented {
+                            VStack(spacing: 12) {
+                                HStack {
+                                    Circle().fill(Console.green).frame(width: 5, height: 5)
+                                    Text("CHANNEL OPEN").tracking(1.2)
+                                    Spacer()
+                                    Button { enterIdle() } label: {
+                                        Label("RETURN TO IDLE", systemImage: "square.grid.2x2")
+                                    }.buttonStyle(ConsoleButtonStyle()).help("Show the dashboard; keep the conversation and draft")
+                                }.font(Console.mono(9)).foregroundStyle(Console.blue)
+                                conversationPanel
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .transition(.opacity)
                         }
                     }
-                    .padding(16)
-                    .allowsHitTesting(!chatPresented)
-                    .accessibilityHidden(chatPresented)
-                    if chatPresented {
-                        Console.background.opacity(0.78)
-                            .contentShape(Rectangle()).onTapGesture { enterIdle() }
-                        VStack(spacing: 0) {
-                            HStack {
-                                Circle().fill(Console.green).frame(width: 5, height: 5)
-                                Text("INTERRUPT RECEIVED / CHANNEL OPEN").tracking(1.2)
-                                Spacer()
-                                Button { enterIdle() } label: {
-                                    Label("RETURN TO IDLE", systemImage: "arrow.down.right.and.arrow.up.left")
-                                }.buttonStyle(ConsoleButtonStyle()).help("Hide chat; keep the conversation and draft")
-                            }.font(Console.mono(9)).foregroundStyle(Console.blue).padding(14)
-                            conversationPanel
-                        }
-                        .background(Console.panel)
-                        .overlay(Rectangle().strokeBorder(Console.blue.opacity(0.5), lineWidth: 1))
-                        .shadow(color: .black.opacity(0.6), radius: 35, y: 20)
-                        .frame(width: min(820, geometry.size.width - 100), height: max(480, geometry.size.height - 230))
-                        .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if geometry.size.width >= 1250 && workspaceMode != .focus {
+                        SessionSidebar(session: session, telemetry: telemetry, showingConnectionSettings: $showingConnectionSettings)
+                            .frame(width: 238)
+                            .workspaceBoot(stage: 3, label: "SESSION")
                     }
                 }
+                .padding(16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                footer
+                footer.workspaceBoot(stage: 10, label: "STATUS BAR")
             }
             .background {
                 Console.background
@@ -79,11 +80,27 @@ struct ChatView: View {
                 ConsoleGrid()
             }
         }
+        .environment(\.workspaceBootStep, reduceMotion ? 11 : bootStep)
+        .task(id: bootReady) {
+            guard bootReady else { return }
+            if reduceMotion { bootStep = 11; return }
+            guard bootStep < 11 else { return }
+            do {
+                for step in 1...11 {
+                    try await Task.sleep(nanoseconds: 220_000_000)
+                    try Task.checkCancellation()
+                    bootStep = step
+                }
+            } catch { }
+        }
+        .onChange(of: reduceMotion) { reduced in
+            if reduced { bootStep = 11 }
+        }
         .foregroundStyle(Console.text)
         .tint(Console.blue)
         .preferredColorScheme(.dark)
         .background(WorkspaceInputMonitor(onActivity: { lastInteraction = Date() }, onTyping: { text in
-            guard !chatPresented, !showingConnectionSettings else { return false }
+            guard bootReady, (reduceMotion || bootStep == 11), !chatPresented, !showingConnectionSettings else { return false }
             openChat()
             session.draft += text
             return true
@@ -222,32 +239,10 @@ struct ChatView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
     }
 
-    private var networkPanel: some View {
-        ConsolePanel(title: "NETWORK OBSERVATORY", index: "01", status: telemetry.primaryInterfaceName?.uppercased() ?? "NO ROUTE") {
-            HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("BEYOND\nBOUNDARIES.")
-                        .font(.system(size: 24, weight: .light, design: .monospaced)).tracking(0.5).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
-                    Text("VAYDENET / TRANSPORT LAYER").font(Console.mono(8)).foregroundStyle(Console.red).tracking(1)
-                    Spacer(minLength: 8)
-                    HStack(spacing: 6) {
-                        Circle().fill(telemetry.isNetworkAvailable ? Console.green : Console.amber).frame(width: 5, height: 5)
-                        Text(telemetry.isNetworkAvailable ? "NETWORK AVAILABLE" : "NETWORK UNAVAILABLE")
-                            .font(Console.mono(8)).foregroundStyle(Console.muted)
-                    }
-                    Text("\(telemetry.interfaces.filter { $0.isUp }.count) active interfaces")
-                        .font(Console.mono(11)).foregroundStyle(Console.text)
-                    Button { animateNetwork.toggle() } label: {
-                        Label(animateNetwork ? "PAUSE ORBIT" : "RESUME ORBIT", systemImage: animateNetwork ? "pause" : "play")
-                    }
-                    .buttonStyle(ConsoleButtonStyle()).help("Pause or resume the illustrative globe animation")
-                }
-                .frame(width: 195, alignment: .leading).padding(16)
-                NetworkGlobeView(isActive: animateNetwork && scenePhase != .background, reduceMotion: reduceMotion)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(ConsoleGrid())
+    private var activityGraphPanel: some View {
+        ConsolePanel(title: "MODEL PERFORMANCE", index: "01", status: "LAST 60 REQUESTS") {
+            CircularActivityView(session: session, isActive: scenePhase != .background && !chatPresented)
+                .background(ConsoleGrid())
         }
     }
 

@@ -91,6 +91,7 @@ struct ConsolePanel<Content: View>: View {
         .overlay(alignment: .topLeading) {
             Rectangle().fill(Console.red.opacity(0.8)).frame(width: 22, height: 1)
         }
+        .workspaceBoot(stage: min(9, (Int(index) ?? 0) + 3), label: title)
     }
 }
 

@@ -7,14 +7,18 @@ struct VaydeAOSApp: App {
     @NSApplicationDelegateAdaptor(VaydeAOSAppDelegate.self) private var appDelegate
     @StateObject private var session = ChatSession()
     @State private var showingConnectionSettings = false
+    @State private var startupComplete = false
+    @AppStorage("startup.soundEnabled") private var startupSoundEnabled = true
 
     var body: some Scene {
         Window("VaydeAOS", id: "chat") {
-            ChatView(session: session, showingConnectionSettings: $showingConnectionSettings)
-                .frame(minWidth: 1080, minHeight: 780)
-                .sheet(isPresented: $showingConnectionSettings) {
-                    ConnectionSettingsView(session: session)
-                }
+            StartupContainer(isComplete: $startupComplete) {
+                ChatView(session: session, showingConnectionSettings: $showingConnectionSettings)
+            }
+            .frame(minWidth: 1080, minHeight: 780)
+            .sheet(isPresented: $showingConnectionSettings) {
+                ConnectionSettingsView(session: session)
+            }
         }
         .defaultSize(width: 1460, height: 980)
         .windowResizability(.contentMinSize)
@@ -26,13 +30,16 @@ struct VaydeAOSApp: App {
                     NotificationCenter.default.post(name: .vaydeOpenChat, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: .command)
+                .disabled(!startupComplete)
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Connection Settings…") {
                     showingConnectionSettings = true
                 }
                 .keyboardShortcut(",", modifiers: .command)
-                .disabled(session.isSending)
+                .disabled(!startupComplete || session.isSending)
+                Divider()
+                Toggle("Startup Sound", isOn: $startupSoundEnabled)
             }
         }
     }
