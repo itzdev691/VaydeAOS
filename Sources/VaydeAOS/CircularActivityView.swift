@@ -119,8 +119,9 @@ private enum PerformanceDrawing {
                 let old = previous.indices.contains(index) ? previous[index] : record
                 let oldValue = series == 0 ? old.elapsed : old.outputTokensPerWallSecond ?? measured
                 let magnitude = log1p(max(0, interpolate(oldValue, measured, blend))) / log1p(series == 0 ? latencyPeak : ratePeak)
-                let angle = -.pi / 2 + Double(index) / Double(max(current.count, 1)) * .pi * 2
-                    + (series == 0 ? -0.006 : 0.006)
+                let sampleAngle = Double(index) / Double(max(current.count, 1)) * Double.pi * 2
+                let seriesOffset: Double = series == 0 ? -0.006 : 0.006
+                let angle = -Double.pi / 2 + sampleAngle + seriesOffset
                 let base = r * (series == 0 ? 0.60 : 0.46)
                 let end = point(center, base + r * 0.33 * magnitude, angle)
                 let sampleColor = series == 0 ? color(record.outcome) : seriesColor
