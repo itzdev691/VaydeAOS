@@ -27,7 +27,10 @@ notarization are separate from this local development build.
 `main`, pushes to `main` or `codex/**`, version tags (`v*`), and manual dispatch.
 It uses [GitHub's macOS runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 on Apple Silicon and Intel to run the Swift tests, build the release SwiftUI app,
-validate bundle resources and its ad-hoc signature, and smoke test native window startup.
+and validate bundle resources and its ad-hoc signature. Native window startup is
+smoke tested on Apple Silicon. The hosted Intel runner aborted inside Metal with
+`Target device architecture is nil` during the [initial runtime check](https://github.com/itzdev691/VaydeAOS/actions/runs/39870566994/job/120143812714),
+so Intel UI runtime remains unverified and its job reports this coverage limit.
 The smoke test requires a logged-in desktop and checks that the app keeps a main
 window for ten seconds across macOS Spaces; interaction tests and visual layout checks remain manual.
 
@@ -38,7 +41,7 @@ packages signed ad-hoc, without Developer ID signing or Apple notarization.
 The workflow does not publish App Store builds or GitHub Releases and requires
 no Apple signing secrets.
 
-Check names are `Apple UI (arm64)` and `Apple UI (x86_64)`. They can be selected
+Check names are `Apple UI (arm64)` and `Apple Build (x86_64)`. They can be selected
 as required status checks after the workflow has been pushed and run on GitHub.
 
 ## Connect a model
