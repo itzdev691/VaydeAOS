@@ -21,6 +21,26 @@ Use `./build.sh release` for an optimized build. The script packages the SwiftPM
 executable into a macOS `.app` and signs it locally. Distribution signing and
 notarization are separate from this local development build.
 
+## Apple UI CI/CD
+
+[Apple UI CI/CD](.github/workflows/apple-ui.yml) runs on pull requests targeting
+`main`, pushes to `main` or `codex/**`, version tags (`v*`), and manual dispatch.
+It uses [GitHub's macOS runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+on Apple Silicon and Intel to run the Swift tests, build the release SwiftUI app,
+validate bundle resources and its ad-hoc signature, and smoke test native window startup.
+The smoke test requires a logged-in desktop and checks that the app keeps a main
+window for ten seconds across macOS Spaces; interaction tests and visual layout checks remain manual.
+
+Successful runs provide architecture-specific `.app` ZIPs and SHA-256 checksums
+under **Actions → Apple UI CI/CD → Artifacts**, retained for 14 days. Validation
+logs are retained for seven days, including on failure. These are development
+packages signed ad-hoc, without Developer ID signing or Apple notarization.
+The workflow does not publish App Store builds or GitHub Releases and requires
+no Apple signing secrets.
+
+Check names are `Apple UI (arm64)` and `Apple UI (x86_64)`. They can be selected
+as required status checks after the workflow has been pushed and run on GitHub.
+
 ## Connect a model
 
 Open the header settings control or **Configure Uplink** to set the API base URL, model name, and optional API key.

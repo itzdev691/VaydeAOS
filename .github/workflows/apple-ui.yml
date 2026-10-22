@@ -1,0 +1,89 @@
+name: Apple UI CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'codex/**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-ui-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  macos:
+    name: Apple UI (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Record Apple toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+          test "$(uname -m)" = "${{ matrix.arch }}"
+
+      - name: Run Swift tests
+        run: |
+          mkdir -p build/ci-logs
+          ./test.sh 2>&1 | tee build/ci-logs/tests.log
+
+      - name: Build release app
+        run: ./build.sh release 2>&1 | tee build/ci-logs/build.log
+
+      - name: Verify app bundle and signature
+        run: |
+          plutil -lint build/VaydeAOS.app/Contents/Info.plist
+          test -x build/VaydeAOS.app/Contents/MacOS/VaydeAOS
+          test -d build/VaydeAOS.app/Contents/Resources/VaydeAOS_VaydeAOS.bundle
+          codesign --verify --deep --strict --verbose=2 build/VaydeAOS.app
+
+      - name: Smoke test native window startup
+        run: swift scripts/ci-ui-smoke.swift build/VaydeAOS.app build/ci-logs/ui.log
+
+      - name: Archive app for download
+        run: |
+          archive="build/VaydeAOS-macos-${{ matrix.arch }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/VaydeAOS.app "$archive"
+          (cd build && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
+
+      - name: Upload app package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: VaydeAOS-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            build/VaydeAOS-macos-${{ matrix.arch }}.zip
+            build/VaydeAOS-macos-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: Apple-UI-logs-${{ matrix.arch }}-${{ github.sha }}
+          path: build/ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7
