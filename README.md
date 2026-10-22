@@ -41,16 +41,28 @@ messages. Replies arrive after the model finishes generating.
 
 ## Console and instruments
 
+At launch, **VAYDEAOS** types over a perspective data grid, then erases before a
+brief flash reveals the workspace. The intro takes about 3.75 seconds, followed
+by a 2.42-second staged instrument reveal. **AOS** uses inverted navy text on a
+blue background, with a red block cursor. The terminal styling draws on
+[eDEX-UI](https://github.com/GitSquared/edex-ui). **ESC TO SKIP** or **Escape** skips
+the intro immediately; the workspace instruments then reveal in stages.
+macOS Reduce Motion uses a short, still sequence and shows all instruments immediately.
+An original 3.45-second chime plays once. **VaydeAOS → Startup Sound** saves
+the sound preference for future launches.
+The sequence is a local interface transition and does not run model requests.
+
 The current experimental palette uses the live VaydeNet site's
 [design tokens](https://vaydenet.duckdns.org/css/tokens.css): navy `#070b18`,
 blue `#60a5fa` / `#1d4ed8`, and red `#ff4c5b`. Green remains a status color.
-The palette is centralized in `ConsoleTheme.swift`, including the globe and settings.
+The palette is centralized in `ConsoleTheme.swift`, including the circular activity graph and settings.
 
 - **Workspace** starts at idle with live instruments and four additional widgets:
   a CPU/RX/TX signal inspector, focus timer with 5/15/25/50-minute presets,
   locally saved scratchpad, and a timestamped session activity log.
-- **Interrupt**, **Command-K**, or typing outside a text editor opens a floating
-  chat panel. Input monitoring is limited to this app's window.
+- **Interrupt**, **Command-K**, or typing outside a text editor opens chat in the
+  main center column, with the side instruments accessible. Input monitoring is
+  limited to this app's window. Dashboard timers and widget state survive switching.
 - **Return to Idle** or **Escape** hides chat without discarding its draft or history.
   During a request, Escape stops the response first. A completed request or error
   reopens the channel if it was hidden.
@@ -59,13 +71,20 @@ The palette is centralized in `ConsoleTheme.swift`, including the globe and sett
 - Scratchpad **Edit/Done** controls editing; **To Chat** appends notes to the draft
   without sending them. Notes and the Auto Idle preference use local UserDefaults.
   The focus timer and activity log last for the current app session.
-- **Network** expands the globe; **Focus** opens chat and hides the side columns.
+- **Network** expands the circular activity graph; **Focus** opens chat and hides the side columns.
 - CPU, active/wired/compressed memory, uptime, interface addresses, and primary
   interface traffic come from local macOS APIs. Samples refresh once per second.
 - Traffic plots retain up to 60 observed samples and scale independently. They
   measure the selected local interface, not model API traffic or remote nodes.
-- The animated globe is illustrative; its routes are not geolocated connections.
-  **Pause Orbit** and the system Reduce Motion setting stop its animation.
+- **Model Performance** plots the last 60 requests for the configured endpoint and
+  model: end-to-end latency (blue), API-reported completion tokens per wall second
+  (green), failures (red), and cancellations (amber). Each series uses its own
+  logarithmic scale. Missing token usage stays unavailable. Throughput includes
+  network, queueing, prompt processing, and any non-visible completion tokens;
+  it does not measure generation-only speed or time to first token.
+  Metrics stay in memory and reset when the endpoint or model changes. No
+  background API calls are made. The right-offset circle retains its subtle
+  bounce and border clipping; Reduce Motion disables bounce and interpolation.
 - Narrow windows collapse the right instrument column; side panels scroll.
 - VaydeNet photography and the wolf mark are bundled with the app. The interaction
   hierarchy draws on the VaydeAOS Obsidian planning notes; it does not imply a
