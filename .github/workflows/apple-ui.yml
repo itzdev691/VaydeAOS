@@ -54,11 +54,19 @@ jobs:
       - name: Build release app
         run: ./build.sh release 2>&1 | tee build/ci-logs/build.log
 
+      - name: Test ChatGPT helper and bundled runtime
+        run: |
+          export PATH="$PWD/build/chatgpt-runtime/node-v22.23.4-darwin-$(test '${{ matrix.arch }}' = arm64 && echo arm64 || echo x64)/bin:$PATH"
+          (cd Helpers/ChatGPT && npm test) 2>&1 | tee build/ci-logs/chatgpt-helper.log
+          python3 scripts/check-chatgpt-helper.py
+
       - name: Verify app bundle and signature
         run: |
           plutil -lint build/VaydeAOS.app/Contents/Info.plist
           test -x build/VaydeAOS.app/Contents/MacOS/VaydeAOS
           test -d build/VaydeAOS.app/Contents/Resources/VaydeAOS_VaydeAOS.bundle
+          test -x build/VaydeAOS.app/Contents/Resources/ChatGPT/node
+          test -x build/VaydeAOS.app/Contents/Resources/ChatGPT/credential-vault
           codesign --verify --deep --strict --verbose=2 build/VaydeAOS.app
 
       - name: Smoke test native window startup

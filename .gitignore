@@ -2,4 +2,7 @@
 .build/
 .swiftpm/
 /build/
+Helpers/ChatGPT/node_modules/
+Helpers/ChatGPT/dist/
+Helpers/ChatGPT/vendor/siwc-local/dist/
 /examples/hello-world/build/

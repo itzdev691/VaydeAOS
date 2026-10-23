@@ -9,6 +9,9 @@ API.
 
 Requires macOS 13 or later and Swift 6 or later from Xcode Command Line Tools
 (`xcode-select --install`). No external Swift packages are required.
+The build downloads a checksum-pinned Node 22 runtime from nodejs.org and installs
+locked helper dependencies from npm. Internet access is required for this step.
+Node and the credential utility are bundled; users need no separate Node installation.
 
 From the repository root:
 

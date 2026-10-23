@@ -25,6 +25,7 @@ ditto "$binary_dir/$resource_bundle" "$app_dir/Contents/Resources/$resource_bund
 if [ -L "$app_dir/$resource_bundle" ]; then
     rm "$app_dir/$resource_bundle"
 fi
+sh "$project_dir/scripts/prepare-chatgpt-helper.sh"
 codesign --force --sign - "$app_dir"
 
 printf 'Built %s\n' "$app_dir"
