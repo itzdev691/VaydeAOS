@@ -3,7 +3,8 @@
 A native macOS command center written in Swift and SwiftUI, with a VaydeNet navy, blue, and red
 console, live system instruments, and an integrated model chat channel. Connection settings support
 local Ollama and servers that implement the OpenAI-compatible Chat Completions
-API.
+API. A separate **ChatGPT plan** provider supports browser sign-in and eligible
+plan usage through OpenAI's local Sign in with ChatGPT SDK.
 
 ## Build and run
 
@@ -48,6 +49,18 @@ Check names are `Apple UI (arm64)` and `Apple Build (x86_64)`. They can be selec
 as required status checks after the workflow has been pushed and run on GitHub.
 
 ## Connect a model
+
+For ChatGPT, open **Connection Settings → ChatGPT plan → Continue with ChatGPT**.
+Complete browser sign-in and authorize plan usage, choose an available model,
+then save. **Manage usage** opens ChatGPT usage settings. Saved connections,
+account switching, reconnect, and sign-out are available in the same panel.
+Identity-only consent leaves plan requests disabled. Existing ChatGPT conversations
+are not imported. The API configuration is retained when switching providers.
+
+ChatGPT responses stream into the chat, and only completed responses are saved.
+Requests use the public Responses API with storage disabled and full conversation
+history. Plan eligibility and usage limits apply; API-key billing remains separate.
+The vendored DevKit has a noncommercial license. See [implementation and validation](docs/chatgpt-sign-in.md).
 
 Open the header settings control or **Configure Uplink** to set the API base URL, model name, and optional API key.
 The default is local Ollama at `http://127.0.0.1:11434/v1` with `qwen3.5:9b`.

@@ -251,7 +251,11 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Image(systemName: "terminal").foregroundStyle(Console.blue)
-                    Text(session.settings.model).foregroundStyle(Console.text).lineLimit(1)
+                    Text(session.settings.activeModel).foregroundStyle(Console.text).lineLimit(1)
+                    if session.settings.provider == .chatGPT {
+                        Link(session.chatGPT.session.canUsePlan ? "Using ChatGPT plan" : "ChatGPT connection required",
+                             destination: ChatGPTAccount.usageURL).foregroundStyle(Console.blue)
+                    }
                     Text("/ \(session.messages.count) messages").foregroundStyle(Console.muted)
                     Spacer()
                     Button { session.newChat(); composerFocused = true } label: {
@@ -299,9 +303,12 @@ struct ChatView: View {
                     ForEach(session.messages) { MessageRow(message: $0) }
                     if let message = session.pendingMessage { MessageRow(message: message) }
                     if session.isSending {
+                        if !session.partialReply.isEmpty {
+                            MessageRow(message: ChatMessage(role: .assistant, content: session.partialReply))
+                        }
                         HStack(spacing: 10) {
                             ProgressView().controlSize(.small)
-                            Text("Awaiting model response…").font(Console.mono(11)).foregroundStyle(Console.blue)
+                            Text(session.partialReply.isEmpty ? "Awaiting model response…" : "Receiving response…").font(Console.mono(11)).foregroundStyle(Console.blue)
                             Spacer()
                         }
                     }
@@ -312,6 +319,7 @@ struct ChatView: View {
             .onAppear { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
             .onChange(of: session.messages.count) { _ in scrollToBottom(proxy) }
             .onChange(of: session.pendingMessage?.id) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.partialReply) { _ in scrollToBottom(proxy) }
         }
     }
 

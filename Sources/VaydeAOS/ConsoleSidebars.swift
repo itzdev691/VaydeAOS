@@ -106,11 +106,12 @@ struct SessionSidebar: View {
                         HStack(spacing: 10) {
                             Image(systemName: "cpu").font(.system(size: 25, weight: .ultraLight)).foregroundStyle(Console.blue)
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(session.settings.model).font(Console.mono(13, weight: .medium)).lineLimit(2)
-                                Text("CHAT COMPLETIONS").font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
+                                Text(session.settings.activeModel).font(Console.mono(13, weight: .medium)).lineLimit(2)
+                                Text(session.settings.provider == .chatGPT ? "RESPONSES / CHATGPT PLAN" : "CHAT COMPLETIONS")
+                                    .font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
                             }
                         }
-                        Text(session.settings.baseURL).font(Console.mono(10)).foregroundStyle(Console.blue)
+                        Text(session.settings.connectionLabel).font(Console.mono(10)).foregroundStyle(Console.blue)
                             .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                         Rectangle().fill(Console.line).frame(height: 1)
                         InstrumentRow(label: "REQUEST", value: session.isSending ? "RUNNING" : session.errorMessage != nil ? "ATTENTION" : "STANDBY", color: session.errorMessage != nil ? Console.amber : Console.green)

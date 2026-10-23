@@ -34,6 +34,9 @@ public struct ChatClient: ChatServing {
     public func measuredReply(to messages: [ChatMessage], settings: ConnectionSettings, apiKey: String?) async throws -> ChatReply {
         try Task.checkCancellation()
         let settings = try settings.validated()
+        guard settings.provider == .compatibleAPI else {
+            throw ChatGPTHelperError(code: "wrong_provider", message: "ChatGPT plan requests require the ChatGPT provider.")
+        }
         guard let endpoint = URL(string: settings.baseURL + "/chat/completions") else {
             throw ConnectionSettingsError.invalidURL
         }

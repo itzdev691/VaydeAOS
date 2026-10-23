@@ -1,22 +1,49 @@
 import Foundation
 
 public struct ConnectionSettings: Codable, Equatable, Sendable {
+    public enum Provider: String, Codable, CaseIterable, Sendable {
+        case compatibleAPI
+        case chatGPT
+    }
     public var baseURL: String
     public var model: String
+    public var provider: Provider
+    public var chatGPTModel: String?
+    public var activeModel: String { provider == .chatGPT ? chatGPTModel ?? "Choose a ChatGPT model" : model }
+    public var connectionLabel: String { provider == .chatGPT ? "ChatGPT plan" : baseURL }
 
     public static let local = ConnectionSettings(
         baseURL: "http://127.0.0.1:11434/v1",
         model: "qwen3.5:9b"
     )
 
-    public init(baseURL: String, model: String) {
+    public init(baseURL: String, model: String, provider: Provider = .compatibleAPI, chatGPTModel: String? = nil) {
         self.baseURL = baseURL
         self.model = model
+        self.provider = provider
+        self.chatGPTModel = chatGPTModel
+    }
+
+    private enum CodingKeys: String, CodingKey { case baseURL, model, provider, chatGPTModel }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        baseURL = try values.decode(String.self, forKey: .baseURL)
+        model = try values.decode(String.self, forKey: .model)
+        provider = try values.decodeIfPresent(Provider.self, forKey: .provider) ?? .compatibleAPI
+        chatGPTModel = try values.decodeIfPresent(String.self, forKey: .chatGPTModel)
     }
 
     public func validated() throws -> ConnectionSettings {
         let endpoint = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let selectedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let planModel = chatGPTModel?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if provider == .chatGPT {
+            guard let planModel, !planModel.isEmpty,
+                  !planModel.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                throw ConnectionSettingsError.missingModel
+            }
+        }
 
         guard !selectedModel.isEmpty,
               !selectedModel.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
@@ -66,7 +93,7 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
         guard let normalizedURL = components.url?.absoluteString else {
             throw ConnectionSettingsError.invalidURL
         }
-        return ConnectionSettings(baseURL: normalizedURL, model: selectedModel)
+        return ConnectionSettings(baseURL: normalizedURL, model: selectedModel, provider: provider, chatGPTModel: planModel)
     }
 
     private static func isLoopback(_ host: String) -> Bool {

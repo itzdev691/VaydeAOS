@@ -8,6 +8,7 @@ public final class ChatSession: ObservableObject {
     @Published public private(set) var settings: ConnectionSettings = .local
     @Published public private(set) var isSending = false
     @Published public private(set) var pendingMessage: ChatMessage?
+    @Published public private(set) var partialReply = ""
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var notice: String?
     @Published public private(set) var performanceHistory: [RequestPerformance] = []
@@ -20,6 +21,8 @@ public final class ChatSession: ObservableObject {
     private let client: any ChatServing
     private let store: LocalStore
     private let credentials: any CredentialStoring
+    public let chatGPT: ChatGPTAccount
+    private var accountChanges: AnyCancellable?
     private var activeRequest: ActiveRequest?
     private var settingsLoadIssue: String?
     private var messagesLoadIssue: String?
@@ -35,11 +38,13 @@ public final class ChatSession: ObservableObject {
     public init(
         client: any ChatServing = ChatClient(),
         store: LocalStore = LocalStore(),
-        credentials: any CredentialStoring = KeychainCredentialStore()
+        credentials: any CredentialStoring = KeychainCredentialStore(),
+        chatGPT: ChatGPTAccount? = nil
     ) {
         self.client = client
         self.store = store
         self.credentials = credentials
+        self.chatGPT = chatGPT ?? ChatGPTAccount()
 
         do {
             if let saved = try store.loadSettings() {
@@ -55,10 +60,13 @@ public final class ChatSession: ObservableObject {
             messagesLoadIssue = "Could not load the saved conversation: \(error.localizedDescription) Start a New Chat to replace the existing file."
         }
         errorMessage = loadIssues
+        accountChanges = self.chatGPT.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     public var canSend: Bool {
         !isSending && activeRequest == nil && loadIssues == nil
+            && (settings.provider != .chatGPT || (!chatGPT.isBusy && chatGPT.session.canUsePlan
+                && chatGPT.models.contains(where: { $0.slug == settings.chatGPTModel })))
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -85,6 +93,7 @@ public final class ChatSession: ObservableObject {
         activeRequest = request
         pendingMessage = request.message
         isSending = true
+        partialReply = ""
         draft = ""
         errorMessage = nil
         notice = nil
@@ -94,7 +103,19 @@ public final class ChatSession: ObservableObject {
                 try Task.checkCancellation()
                 guard self?.activeRequest?.id == request.id else { return }
                 self?.performanceRequestStartedAt = ProcessInfo.processInfo.systemUptime
-                let response = try await client.measuredReply(to: conversation, settings: connection, apiKey: apiKey)
+                let response: ChatReply
+                if connection.provider == .chatGPT {
+                    guard let account = self?.chatGPT else { return }
+                    response = try await account.reply(to: conversation, model: connection.activeModel) { [weak self] delta in
+                        Task { @MainActor [weak self] in
+                            guard self?.activeRequest?.id == request.id,
+                                  delta.utf8.count >= (self?.partialReply.utf8.count ?? 0) else { return }
+                            self?.partialReply = delta
+                        }
+                    }
+                } else {
+                    response = try await client.measuredReply(to: conversation, settings: connection, apiKey: apiKey)
+                }
                 if Task.isCancelled {
                     self?.finishCancellation(request.id)
                 } else if response.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -148,6 +169,7 @@ public final class ChatSession: ObservableObject {
 
     public func apiKey(for settings: ConnectionSettings) throws -> String? {
         let connection = try settings.validated()
+        guard connection.provider == .compatibleAPI else { return nil }
         if let key = sessionAPIKeys[connection.baseURL] {
             return key.isEmpty ? nil : key
         }
@@ -165,8 +187,21 @@ public final class ChatSession: ObservableObject {
         rememberAPIKey: Bool = true
     ) throws {
         notice = nil
-        guard !isSending else { throw SessionError.requestInProgress }
+        guard !isSending, !chatGPT.isBusy else { throw SessionError.requestInProgress }
         let connection = try settings.validated()
+        if connection.provider == .chatGPT {
+            guard chatGPT.session.canUsePlan,
+                  chatGPT.models.contains(where: { $0.slug == connection.chatGPTModel }) else {
+                throw ChatGPTHelperError(code: "sign_in_required", message: "Connect ChatGPT, authorize plan usage, and select an available model.")
+            }
+            try store.saveSettings(connection)
+            if self.settings != connection { performanceHistory = [] }
+            self.settings = connection
+            settingsLoadIssue = nil
+            errorMessage = messagesLoadIssue
+            notice = "Using ChatGPT plan."
+            return
+        }
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if rememberAPIKey {
             try credentials.save(key, for: connection.baseURL)
@@ -230,6 +265,7 @@ public final class ChatSession: ObservableObject {
     }
 
     private func clearActiveRequest() {
+        partialReply = ""
         performanceRequestStartedAt = nil
         activeRequest = nil
         pendingMessage = nil
