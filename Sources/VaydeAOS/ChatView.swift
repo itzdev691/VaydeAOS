@@ -39,7 +39,7 @@ struct ChatView: View {
                             VStack(spacing: 12) {
                                 idleBanner.workspaceBoot(stage: 3, label: "WORKSPACE")
                                 activityGraphPanel.frame(height: workspaceMode == .network ? 300 : 230)
-                                WorkspaceWidgets(telemetry: telemetry, events: events,
+                                WorkspaceWidgets(isActive: !chatPresented, events: events,
                                                  interrupt: { openChat(prompt: $0) }, record: record)
                             }
                         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -240,8 +240,8 @@ struct ChatView: View {
     }
 
     private var activityGraphPanel: some View {
-        ConsolePanel(title: "MODEL PERFORMANCE", index: "01", status: "LAST 60 REQUESTS") {
-            CircularActivityView(session: session, isActive: scenePhase != .background && !chatPresented)
+        ConsolePanel(title: "OPENAI API STATUS", index: "01", status: "PUBLIC FEED / 60 SEC") {
+            CircularActivityView(isActive: scenePhase == .active && !chatPresented)
                 .background(ConsoleGrid())
         }
     }

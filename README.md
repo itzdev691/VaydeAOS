@@ -81,8 +81,13 @@ blue `#60a5fa` / `#1d4ed8`, and red `#ff4c5b`. Green remains a status color.
 The palette is centralized in `ConsoleTheme.swift`, including the circular activity graph and settings.
 
 - **Workspace** starts at idle with live instruments and four additional widgets:
-  a CPU/RX/TX signal inspector, focus timer with 5/15/25/50-minute presets,
+  an ambient signal field, focus timer with 5/15/25/50-minute presets,
   locally saved scratchpad, and a timestamped session activity log.
+- **Signal Field** replaces the duplicate CPU/RX/TX inspector with a flowing wire
+  surface. **Phase Core** replaces the repeated session summary with orbital
+  artwork. Both are labeled **Ambient**, contain no telemetry or simulated
+  measurements, and use native procedural graphics. Animation stops when the
+  app is inactive, when the field is hidden by chat, or with Reduce Motion enabled.
 - **Interrupt**, **Command-K**, or typing outside a text editor opens chat in the
   main center column, with the side instruments accessible. Input monitoring is
   limited to this app's window. Dashboard timers and widget state survive switching.
@@ -99,15 +104,19 @@ The palette is centralized in `ConsoleTheme.swift`, including the circular activ
   interface traffic come from local macOS APIs. Samples refresh once per second.
 - Traffic plots retain up to 60 observed samples and scale independently. They
   measure the selected local interface, not model API traffic or remote nodes.
-- **Model Performance** plots the last 60 requests for the configured endpoint and
-  model: end-to-end latency (blue), API-reported completion tokens per wall second
-  (green), failures (red), and cancellations (amber). Each series uses its own
-  logarithmic scale. Missing token usage stays unavailable. Throughput includes
-  network, queueing, prompt processing, and any non-visible completion tokens;
-  it does not measure generation-only speed or time to first token.
-  Metrics stay in memory and reset when the endpoint or model changes. No
-  background API calls are made. The right-offset circle retains its subtle
-  bounce and border clipping; Reduce Motion disables bounce and interpolation.
+- **OpenAI API Status** polls OpenAI's public
+  [status feed](https://status.openai.com/api/v2/summary.json) every 60 seconds
+  while the dashboard is visible and the app is active. The circular graph keeps
+  the last 60 observations of Chat Completions (inner band) and Responses (outer
+  band). Outward spikes indicate reported degradation or outages; colors identify
+  operational, degraded, outage, and maintenance states. Missing components,
+  unknown states, and failed polls leave gaps. Failed or older-than-150-second
+  observations show an unavailable or stale feed indicator. History is session-only;
+  hidden/background time is not filled with invented samples. No API key, prompts,
+  or configured endpoint/model are sent to the status feed. OpenAI aggregates
+  availability across models and tiers; this graph does not report a selected
+  model's latency, token speed, or benchmark score. The right-offset circle retains
+  its subtle bounce and border clipping; Reduce Motion disables bounce.
 - Narrow windows collapse the right instrument column; side panels scroll.
 - VaydeNet photography and the wolf mark are bundled with the app. The interaction
   hierarchy draws on the VaydeAOS Obsidian planning notes; it does not imply a

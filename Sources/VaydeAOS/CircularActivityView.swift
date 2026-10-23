@@ -2,72 +2,69 @@ import Foundation
 import SwiftUI
 import VaydeAOSCore
 
-/// Request performance observed by this app; no background probes or synthetic samples.
+/// OpenAI's public aggregate API health, independent of this app's model requests.
 struct CircularActivityView: View {
-    @ObservedObject var session: ChatSession
     var isActive: Bool
+    @StateObject private var status = PublicAPIStatus()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var previous: [RequestPerformance] = []
-    @State private var current: [RequestPerformance] = []
-    @State private var sampleTime = Date.timeIntervalSinceReferenceDate
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || !isActive)) { timeline in
             Canvas { context, size in
-                let time = timeline.date.timeIntervalSinceReferenceDate
-                let progress = reduceMotion ? 1 : min(1, max(0, (time - sampleTime) / 0.8))
-                PerformanceDrawing.draw(in: &context, size: size, previous: previous, current: current,
-                    blend: progress * progress * (3 - 2 * progress),
-                    phase: reduceMotion || !isActive ? 0 : time)
+                StatusDrawing.draw(in: &context, size: size, history: status.history,
+                    phase: reduceMotion || !isActive ? 0 : timeline.date.timeIntervalSinceReferenceDate)
             }
         }
         .clipped()
-        .overlay(alignment: .leading) { readout.frame(width: 175, alignment: .leading).padding(.leading, 22) }
+        .overlay(alignment: .leading) {
+            readout.frame(width: 175, alignment: .leading).padding(.leading, 22)
+        }
         .overlay(alignment: .trailing) {
             VStack(alignment: .trailing, spacing: 10) {
-                legend("LATENCY", color: Console.blue)
-                legend("OUTPUT RATE", color: Console.green)
-                legend("FAILED", color: Console.red)
-                legend("CANCELLED", color: Console.amber)
+                legend("OPERATIONAL", color: Console.blue)
+                legend("DEGRADED", color: Console.amber)
+                legend("OUTAGE", color: Console.red)
+                legend("MAINTENANCE", color: Console.muted)
             }.padding(.trailing, 22).allowsHitTesting(false)
         }
-        .onAppear { current = session.performanceHistory; previous = current }
-        .onChange(of: session.performanceHistory) { history in
-            previous = current
-            current = history
-            sampleTime = Date.timeIntervalSinceReferenceDate
+        .task(id: isActive) {
+            if isActive { await status.poll() }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Vayde Pulse model performance. \(session.performanceHistory.count) requests observed this session. Blue: end-to-end request time. Green: reported completion tokens per wall second. Red: failed. Amber: cancelled. Oldest at top, clockwise. \(session.isSending ? "Request in progress." : "")")
-        .help("Last 60 requests for the configured endpoint and model. Latency includes network, queueing, and model work. Output rate is API-reported completion tokens divided by total request time, including non-visible tokens; it is not generation-only speed. Each metric uses its own logarithmic scale. Missing usage leaves a gap. Bounce is decorative.")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("OpenAI public API status. Inner band: Chat Completions. Outer band: Responses. One-hour history clockwise, newest at top. Outward spikes indicate disruption. \(status.history.count) observations.")
+        .help("Source: status.openai.com, refreshed every 60 seconds while visible. Aggregate availability across models and tiers, not per-model latency, throughput, or benchmark performance. Inner band: Chat Completions; outer band: Responses. Outward spikes: degraded, partial outage, major outage. Missing data leaves gaps. Vertical bounce is decorative.")
     }
 
-    @ViewBuilder private var readout: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let start = session.performanceRequestStartedAt {
-                Text("REQUEST ELAPSED").font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
-                TimelineView(.periodic(from: .now, by: 0.1)) { _ in
-                    Text(String(format: "%.1f s", max(0, ProcessInfo.processInfo.systemUptime - start)))
-                        .font(Console.mono(18, weight: .light)).monospacedDigit().foregroundStyle(Console.blue)
-                }
-            } else if let last = session.performanceHistory.last {
-                Text("LAST REQUEST / \(last.outcome.rawValue.uppercased())")
-                    .font(Console.mono(8)).foregroundStyle(PerformanceDrawing.color(last.outcome))
-                Text(String(format: "%.2f s", last.elapsed)).font(Console.mono(18, weight: .light))
-                    .monospacedDigit().foregroundStyle(Console.blue)
-                if let rate = last.outputTokensPerWallSecond {
-                    Text(String(format: "%.1f TOKENS / WALL SEC", rate))
-                        .font(Console.mono(9)).foregroundStyle(Console.green).monospacedDigit()
+    private var readout: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            VStack(alignment: .leading, spacing: 8) {
+                Text("OPENAI / PUBLIC HEALTH")
+                    .font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
+                if status.history.isEmpty {
+                    Text("FETCHING STATUS").font(Console.mono(11)).foregroundStyle(Console.blue)
                 } else {
-                    Text("OUTPUT RATE UNAVAILABLE").font(Console.mono(8)).foregroundStyle(Console.muted)
+                    service("CHAT COMPLETIONS / INNER", state: status.snapshot?.chatCompletions ?? .unknown)
+                    service("RESPONSES / OUTER", state: status.snapshot?.responses ?? .unknown)
                 }
-                Text("IN \(last.inputTokens.map(String.init) ?? "—") / OUT \(last.outputTokens.map(String.init) ?? "—") TOKENS")
-                    .font(Console.mono(8)).foregroundStyle(Console.muted)
-            } else {
-                Text("AWAITING REQUEST").font(Console.mono(12, weight: .medium)).foregroundStyle(Console.blue)
-                Text("Metrics appear as model requests finish.")
-                    .font(Console.mono(9)).foregroundStyle(Console.muted).fixedSize(horizontal: false, vertical: true)
+                Text("AGGREGATE ACROSS MODELS")
+                    .font(Console.mono(7)).foregroundStyle(Console.muted)
+                if status.feedFailed {
+                    Text("FEED UNAVAILABLE / RETRY 60S")
+                        .font(Console.mono(7)).foregroundStyle(Console.amber)
+                } else if let lastSuccess = status.lastSuccess {
+                    Text("\(status.isStale(at: timeline.date) ? "STALE" : "FETCHED") \(max(0, Int(timeline.date.timeIntervalSince(lastSuccess))))S AGO")
+                        .font(Console.mono(8)).foregroundStyle(status.isStale(at: timeline.date) ? Console.amber : Console.muted)
+                }
+                Link("STATUS.OPENAI.COM", destination: URL(string: "https://status.openai.com")!)
+                    .font(Console.mono(8)).foregroundStyle(Console.blue)
             }
+        }
+    }
+
+    private func service(_ title: String, state: OpenAIServiceStatus) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(Console.mono(7)).foregroundStyle(Console.muted)
+            Text(state.label).font(Console.mono(11, weight: .medium)).foregroundStyle(StatusDrawing.color(state))
         }
     }
 
@@ -79,17 +76,18 @@ struct CircularActivityView: View {
     }
 }
 
-private enum PerformanceDrawing {
-    static func color(_ outcome: RequestPerformance.Outcome) -> Color {
-        switch outcome {
-        case .success: return Console.blue
-        case .failed: return Console.red
-        case .cancelled: return Console.amber
+private enum StatusDrawing {
+    static func color(_ status: OpenAIServiceStatus) -> Color {
+        switch status {
+        case .operational: return Console.blue
+        case .degradedPerformance: return Console.amber
+        case .partialOutage, .majorOutage: return Console.red
+        case .maintenance, .unknown: return Console.muted
         }
     }
 
     static func draw(in context: inout GraphicsContext, size: CGSize,
-                     previous: [RequestPerformance], current: [RequestPerformance], blend: Double, phase: Double) {
+                     history: [OpenAIStatusSample], phase: Double) {
         let radius = min(size.height * 0.62, size.width * 0.34)
         guard radius > 10 else { return }
         let center = CGPoint(x: size.width * 0.62, y: size.height / 2 + sin(phase * 1.6) * 1.4)
@@ -97,7 +95,7 @@ private enum PerformanceDrawing {
         context.fill(circle(center, r * 1.2), with: .radialGradient(
             Gradient(colors: [Console.blue.opacity(0.07), .clear]), center: center,
             startRadius: r * 0.3, endRadius: r * 1.2))
-        for fraction in [0.32, 0.43, 0.54, 0.65, 0.76, 0.87, 1.0] {
+        for fraction in [0.32, 0.43, 0.50, 0.57, 0.64, 0.71, 0.78, 0.85, 0.92, 1.0] {
             context.stroke(circle(center, r * fraction), with: .color(Console.blue.opacity(fraction == 1 ? 0.28 : 0.13)), lineWidth: 0.5)
         }
         var grid = Path()
@@ -108,50 +106,41 @@ private enum PerformanceDrawing {
         }
         context.stroke(grid, with: .color(Console.blue.opacity(0.12)), lineWidth: 0.45)
 
-        let latencyPeak = max(1, (previous + current).map(\.elapsed).max() ?? 1)
-        let ratePeak = max(1, (previous + current).compactMap(\.outputTokensPerWallSecond).max() ?? 1)
+        // Fixed ordinal bands: a larger radius always means greater reported disruption.
+        // The angular distance reflects observation time, leaving gaps while suspended.
+        let endTime = history.last?.observedAt ?? Date()
+        let startTime = endTime.addingTimeInterval(-3600)
         for series in 0...1 {
-            let seriesColor = series == 0 ? Console.blue : Console.green
-            var lastPoint: CGPoint?
-            for (index, record) in current.enumerated() {
-                let measured = series == 0 ? record.elapsed : record.outputTokensPerWallSecond
-                guard let measured else { lastPoint = nil; continue }
-                let old = previous.indices.contains(index) ? previous[index] : record
-                let oldValue = series == 0 ? old.elapsed : old.outputTokensPerWallSecond ?? measured
-                let magnitude = log1p(max(0, interpolate(oldValue, measured, blend))) / log1p(series == 0 ? latencyPeak : ratePeak)
-                let sampleAngle = Double(index) / Double(max(current.count, 1)) * Double.pi * 2
-                let seriesOffset: Double = series == 0 ? -0.006 : 0.006
-                let angle = -Double.pi / 2 + sampleAngle + seriesOffset
-                let base = r * (series == 0 ? 0.60 : 0.46)
-                let end = point(center, base + r * 0.33 * magnitude, angle)
-                let sampleColor = series == 0 ? color(record.outcome) : seriesColor
+            var previous: (point: CGPoint, date: Date)?
+            for sample in history where sample.observedAt >= startTime {
+                let state = (series == 0 ? sample.snapshot?.chatCompletions : sample.snapshot?.responses) ?? .unknown
+                guard state != .unknown else { previous = nil; continue }
+                let angle = -Double.pi / 2 + sample.observedAt.timeIntervalSince(startTime) / 3600 * Double.pi * 2
+                let base = r * (series == 0 ? 0.43 : 0.71)
+                let end = point(center, base + r * 0.07 * (state.disruptionLevel ?? 0), angle)
+                let sampleColor = color(state)
                 var spoke = Path()
                 spoke.move(to: point(center, base, angle))
                 spoke.addLine(to: end)
                 context.stroke(spoke, with: .color(sampleColor.opacity(0.65)), lineWidth: 0.7)
-                if let lastPoint {
+                if let previous, sample.observedAt.timeIntervalSince(previous.date) < 90 {
                     var trace = Path()
-                    trace.move(to: lastPoint)
+                    trace.move(to: previous.point)
                     trace.addLine(to: end)
-                    context.stroke(trace, with: .color(seriesColor.opacity(0.10)), lineWidth: 4)
-                    context.stroke(trace, with: .color(seriesColor.opacity(0.8)), lineWidth: 0.8)
+                    context.stroke(trace, with: .color(sampleColor.opacity(0.10)), lineWidth: 4)
+                    context.stroke(trace, with: .color(sampleColor.opacity(0.8)), lineWidth: 0.8)
                 }
-                context.fill(circle(end, 1.3), with: .color(sampleColor))
-                context.stroke(circle(end, 2.8), with: .color(sampleColor.opacity(0.45)), lineWidth: 0.5)
-                var tick = Path()
-                tick.move(to: point(center, r * 1.015, angle))
-                tick.addLine(to: point(center, r * (1.035 + magnitude * 0.05), angle))
-                context.stroke(tick, with: .color(sampleColor.opacity(0.75)), lineWidth: 0.8)
-                lastPoint = end
+                context.fill(circle(end, 1.8), with: .color(sampleColor))
+                context.stroke(circle(end, 3.2), with: .color(sampleColor.opacity(0.45)), lineWidth: 0.5)
+                previous = (end, sample.observedAt)
             }
         }
         context.draw(Text("VAYDE").font(Console.mono(10, weight: .medium)).tracking(2).foregroundColor(Console.text),
                      at: CGPoint(x: center.x, y: center.y - 4))
-        context.draw(Text("PULSE").font(Console.mono(6)).tracking(1).foregroundColor(Console.blue),
+        context.draw(Text("API HEALTH").font(Console.mono(6)).tracking(1).foregroundColor(Console.blue),
                      at: CGPoint(x: center.x, y: center.y + 9))
     }
 
-    private static func interpolate(_ a: Double, _ b: Double, _ t: Double) -> Double { a + (b - a) * t }
     private static func point(_ center: CGPoint, _ radius: Double, _ angle: Double) -> CGPoint {
         CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
     }

@@ -150,26 +150,11 @@ struct SessionSidebar: View {
                         }.buttonStyle(.plain)
                     }
                 }
-                ConsolePanel(title: "SESSION STATE", index: "LOG") {
-                    VStack(alignment: .leading, spacing: 15) {
-                        event("01", "Workspace loaded", detail: "Native macOS session", color: Console.green)
-                        event("02", "Model configured", detail: session.settings.model, color: Console.blue)
-                        event("03", session.isSending ? "Request running" : session.errorMessage != nil ? "Action required" : "Awaiting input",
-                              detail: session.isSending ? "Stop available in command channel" : session.errorMessage != nil ? "Review the command channel" : "Command-Return to transmit",
-                              color: session.isSending || session.errorMessage != nil ? Console.amber : Console.muted)
-                    }.padding(14)
+                ConsolePanel(title: "PHASE CORE", index: "FX", status: "AMBIENT") {
+                    AmbientGraphic(style: .core).frame(height: 176)
                 }
             }
         }
     }
 
-    private func event(_ number: String, _ title: String, detail: String, color: Color) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(number).font(Console.mono(9)).foregroundStyle(color).padding(.top, 2)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(Console.mono(10)).foregroundStyle(Console.text)
-                Text(detail).font(Console.mono(9)).foregroundStyle(Console.muted).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
 }

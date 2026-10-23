@@ -1,12 +1,11 @@
 import SwiftUI
 
 struct WorkspaceWidgets: View {
-    @ObservedObject var telemetry: SystemTelemetry
+    var isActive: Bool
     let events: [WorkspaceEvent]
     let interrupt: (String?) -> Void
     let record: (String) -> Void
     @AppStorage("workspace.scratchpad") private var scratchpad = ""
-    @State private var signal = 0
     @State private var duration = 25
     @State private var remaining: TimeInterval = 25 * 60
     @State private var deadline: Date?
@@ -15,12 +14,11 @@ struct WorkspaceWidgets: View {
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var seconds: Int { max(0, Int(ceil(deadline?.timeIntervalSince(now) ?? remaining))) }
-    private var samples: [Double] { signal == 0 ? telemetry.cpuHistory : signal == 1 ? telemetry.receiveHistory : telemetry.sendHistory }
 
     var body: some View {
         VStack(spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
-                signalCard
+                signalField
                 timerCard
             }
             HStack(alignment: .top, spacing: 12) {
@@ -38,29 +36,9 @@ struct WorkspaceWidgets: View {
         }
     }
 
-    private var signalCard: some View {
-        ConsolePanel(title: "SIGNAL INSPECTOR", index: "03", status: "LIVE") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 14) {
-                    ForEach(Array(["CPU", "RX", "TX"].enumerated()), id: \.offset) { index, label in
-                        Button { signal = index } label: {
-                            Text(label).font(Console.mono(10)).foregroundStyle(signal == index ? Console.blue : Console.muted)
-                                .padding(.bottom, 5).overlay(alignment: .bottom) {
-                                    if signal == index { Rectangle().fill(Console.red).frame(height: 1) }
-                                }
-                        }.buttonStyle(.plain).accessibilityAddTraits(signal == index ? .isSelected : [])
-                    }
-                    Spacer()
-                    Text(signal == 0 ? String(format: "%.1f %%", telemetry.cpuUsage * 100) : Console.rate(signal == 1 ? telemetry.receiveBytesPerSecond : telemetry.sendBytesPerSecond))
-                        .font(Console.mono(14)).foregroundStyle(Console.blue).monospacedDigit()
-                }
-                TelemetryTraceView(samples: samples, color: signal == 2 ? Console.red : Console.blue).frame(height: 60)
-                HStack {
-                    Text("\(samples.count) SAMPLES")
-                    Spacer()
-                    Text(signal == 0 ? "HOST CPU" : telemetry.primaryInterfaceName?.uppercased() ?? "NO INTERFACE")
-                }.font(Console.mono(8)).foregroundStyle(Console.muted)
-            }.padding(14)
+    private var signalField: some View {
+        ConsolePanel(title: "SIGNAL FIELD", index: "03", status: "AMBIENT") {
+            AmbientGraphic(style: .field, isActive: isActive).frame(height: 140)
         }.frame(maxWidth: .infinity)
     }
 
