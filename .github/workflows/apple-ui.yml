@@ -24,14 +24,17 @@ jobs:
     name: ${{ matrix.check_name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    env:
+      # Pin the SDK and compiler for every build/test/packaging command.
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: macos-26
             arch: arm64
             check_name: Apple UI (arm64)
-          - runner: macos-15-intel
+          - runner: macos-26-intel
             arch: x86_64
             check_name: Apple Build (x86_64)
     steps:
@@ -40,10 +43,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Record Apple toolchain
+      - name: Verify pinned Apple toolchain
         run: |
+          test -d "$DEVELOPER_DIR"
           xcodebuild -version
-          xcrun swift --version
+          swift_version="$(xcrun swift --version)"
+          printf '%s\n' "$swift_version"
+          if [[ ! "$swift_version" =~ Apple\ Swift\ version\ 6\.3(\.|[[:space:]]) ]]; then
+            echo '::error::Expected Apple Swift 6.3.x from Xcode 26.6.'
+            exit 1
+          fi
           test "$(uname -m)" = "${{ matrix.arch }}"
 
       - name: Run Swift tests

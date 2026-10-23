@@ -31,7 +31,10 @@ notarization are separate from this local development build.
 `main`, pushes to `main` or `codex/**`, version tags (`v*`), and manual dispatch.
 It uses [GitHub's macOS runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 on Apple Silicon and Intel to run the Swift tests, build the release SwiftUI app,
-and validate bundle resources and its ad-hoc signature. Native window startup is
+and validate bundle resources and its ad-hoc signature. Both jobs use macOS 26
+with Xcode 26.6 explicitly selected through `DEVELOPER_DIR`. An initial check
+requires Apple Swift 6.3.x so runner defaults cannot silently change the compiler.
+Native window startup is
 smoke tested on Apple Silicon. The hosted Intel runner aborted inside Metal with
 `Target device architecture is nil` during the [initial runtime check](https://github.com/itzdev691/VaydeAOS/actions/runs/39870566994/job/120143812714),
 so Intel UI runtime remains unverified and its job reports this coverage limit.
