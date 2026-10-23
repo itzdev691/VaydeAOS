@@ -98,10 +98,12 @@ export function createBridge(chatgpt, send) {
         case 'models': result = { models: await chatgpt.listModels({ signal: controller.signal }) }; break;
         case 'reply': {
           if (typeof request.model !== 'string' || !Array.isArray(request.messages) || !request.messages.length ||
+              (request.reasoningEffort !== undefined && !['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(request.reasoningEffort)) ||
               request.messages.some(m => !m || !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) {
             throw new ChatGPTError('invalid_request', '');
           }
           const reply = await chatgpt.streamResponse({ model: request.model,
+            ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
             input: request.messages.map(m => ({ role: m.role, content: m.content })), signal: controller.signal,
             onDelta: delta => { if (!controller.signal.aborted) send({ id, kind: 'delta', delta }); } });
           controller.signal.throwIfAborted();

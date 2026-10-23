@@ -63,7 +63,8 @@ public struct ChatClient: ChatServing {
         request.httpBody = try JSONEncoder().encode(CompletionRequest(
             model: settings.model,
             messages: messages.map { RequestMessage(role: $0.role, content: $0.content) },
-            stream: false
+            stream: false,
+            reasoningEffort: settings.reasoningEffort.requestValue
         ))
 
         let data: Data
@@ -228,6 +229,12 @@ private struct CompletionRequest: Encodable {
     let model: String
     let messages: [RequestMessage]
     let stream: Bool
+    let reasoningEffort: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case model, messages, stream
+        case reasoningEffort = "reasoning_effort"
+    }
 }
 
 private struct RequestMessage: Encodable {

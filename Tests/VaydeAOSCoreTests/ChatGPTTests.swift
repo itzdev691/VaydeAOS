@@ -43,6 +43,8 @@ struct ChatGPTTests {
         let settings = ConnectionSettings(baseURL: "https://api.example.com/v1", model: "api-model", provider: .chatGPT, chatGPTModel: "plan-model")
         try session.saveSettings(settings, apiKey: "ignored")
         #expect(try session.apiKey(for: settings) == nil)
+        try session.setReasoningEffort(.high)
+        #expect(try LocalStore(directory: directory).loadSettings()?.reasoningEffort == .high)
         session.draft = "First prompt"
         session.send()
         await session.sendTask?.value
@@ -51,12 +53,25 @@ struct ChatGPTTests {
         session.send()
         await session.sendTask?.value
         let requests = await helper.requests.filter { $0.method == "reply" }
+        #expect(requests.allSatisfy { $0.reasoningEffort == "high" })
         #expect(requests.last?.messages?.map(\.content) == ["First prompt", "Completed reply", "Follow-up"])
         #expect(session.partialReply.isEmpty)
         #expect(try LocalStore(directory: directory).loadMessages() == session.messages)
         #expect(credentials.calls == 0)
         #expect(session.performanceHistory.count == 2)
         #expect(session.performanceHistory.allSatisfy { $0.inputTokens == nil })
+    }
+
+    @Test @MainActor func reasoningSelectionPersistsWithoutAccessingCredentials() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let credentials = ForbiddenAPICredentials()
+        let store = LocalStore(directory: directory)
+        let session = ChatSession(store: store, credentials: credentials)
+        try session.setReasoningEffort(.medium)
+        let restored = ChatSession(store: store, credentials: credentials)
+        #expect(restored.settings.reasoningEffort == .medium)
+        #expect(credentials.calls == 0)
     }
 
     @Test @MainActor func identityWithoutPlanPermissionCannotBeSavedOrSent() async throws {

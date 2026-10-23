@@ -3,7 +3,7 @@ import { readdir, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 await mkdir('dist', { recursive: true });
-// Compile the unchanged upstream modules separately for their regression suite.
+// Compile the vendored modules separately for their regression suite.
 await build({ entryPoints: (await readdir('vendor/siwc-local/src')).filter(f => f.endsWith('.ts')).map(f => `vendor/siwc-local/src/${f}`),
   outdir: 'vendor/siwc-local/dist', platform: 'node', format: 'esm', target: 'node22' });
 

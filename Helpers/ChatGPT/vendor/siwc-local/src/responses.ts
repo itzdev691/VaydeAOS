@@ -40,6 +40,7 @@ export async function streamResponse(
   try {
     const result = await client.responses.create({
       model: options.model,
+      ...(options.reasoningEffort !== undefined ? { reasoning: { effort: options.reasoningEffort } } : {}),
       input: input.map((message) => ({ role: message.role, content: message.content })),
       ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
       store: false,

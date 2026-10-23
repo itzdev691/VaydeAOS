@@ -106,7 +106,8 @@ public final class ChatSession: ObservableObject {
                 let response: ChatReply
                 if connection.provider == .chatGPT {
                     guard let account = self?.chatGPT else { return }
-                    response = try await account.reply(to: conversation, model: connection.activeModel) { [weak self] delta in
+                    response = try await account.reply(to: conversation, model: connection.activeModel,
+                                                       reasoningEffort: connection.reasoningEffort) { [weak self] delta in
                         Task { @MainActor [weak self] in
                             guard self?.activeRequest?.id == request.id,
                                   delta.utf8.count >= (self?.partialReply.utf8.count ?? 0) else { return }
@@ -179,6 +180,20 @@ public final class ChatSession: ObservableObject {
     public func usesSessionAPIKey(for settings: ConnectionSettings) -> Bool {
         guard let connection = try? settings.validated() else { return false }
         return sessionAPIKeys[connection.baseURL] != nil
+    }
+
+    public func setReasoningEffort(_ effort: ConnectionSettings.ReasoningEffort) throws {
+        guard !isSending, !chatGPT.isBusy else { throw SessionError.requestInProgress }
+        // Preserve an unreadable settings file until Connection Settings repairs it.
+        guard settingsLoadIssue == nil else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        guard effort != settings.reasoningEffort else { return }
+        var connection = settings
+        connection.reasoningEffort = effort
+        try store.saveSettings(connection)
+        settings = connection
+        performanceHistory = []
     }
 
     public func saveSettings(

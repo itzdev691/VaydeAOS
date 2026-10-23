@@ -35,6 +35,7 @@ public final class ChatGPTAccount: ObservableObject {
     public func cancel() { if canCancel { operation?.cancel() } }
 
     public func reply(to messages: [ChatMessage], model: String,
+                      reasoningEffort: ConnectionSettings.ReasoningEffort = .automatic,
                       onDelta: @escaping @Sendable (String) -> Void) async throws -> ChatReply {
         guard !isBusy, session.canUsePlan else {
             throw ChatGPTHelperError(code: "sign_in_required", message: "Connect ChatGPT and authorize plan usage in Connection Settings.")
@@ -44,6 +45,7 @@ public final class ChatGPTAccount: ObservableObject {
         }
         var request = ChatGPTHelperRequest(method: "reply")
         request.model = model
+        request.reasoningEffort = reasoningEffort.requestValue
         request.messages = messages
         let response = try await helper.request(request, onDelta: onDelta)
         try Task.checkCancellation()

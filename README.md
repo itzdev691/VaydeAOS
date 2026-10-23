@@ -63,6 +63,8 @@ history. Plan eligibility and usage limits apply; API-key billing remains separa
 The vendored DevKit has a noncommercial license. See [implementation and validation](docs/chatgpt-sign-in.md).
 
 Open the header settings control or **Configure Uplink** to set the API base URL, model name, and optional API key.
+
+The **Reasoning Mode** slider above **Configure Uplink** saves the effort for subsequent requests: Auto, None, Minimal, Low, Medium, High, Extra high, or Max. Auto preserves the model default. Supported levels depend on the selected model and provider. The setting applies to both compatible APIs and ChatGPT plan requests.
 The default is local Ollama at `http://127.0.0.1:11434/v1` with `qwen3.5:9b`.
 Ollama must be running with the selected model installed. Change the model name
 to use a different installed model.

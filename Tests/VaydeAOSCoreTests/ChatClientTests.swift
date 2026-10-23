@@ -51,6 +51,19 @@ final class ChatClientTests {
         #expect(result.outputTokens == 120)
     }
 
+    @Test func testSelectedReasoningEffortIsSentToCompatibleAPI() async throws {
+        for effort in ConnectionSettings.ReasoningEffort.allCases {
+            let client = makeClient { request in
+                let body = try #require(JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any])
+                #expect(body["reasoning_effort"] as? String == effort.requestValue)
+                return .response(200, Self.replyData("Reply"))
+            }
+            var settings = ConnectionSettings.local
+            settings.reasoningEffort = effort
+            _ = try await client.reply(to: [], settings: settings, apiKey: nil)
+        }
+    }
+
     @Test func testMissingOrInvalidUsageDoesNotDiscardValidReplies() async throws {
         for usage in ["null", "[]", "{}", "false", #"{"prompt_tokens":-1,"completion_tokens":"invalid"}"#] {
             let body = #"{"choices":[{"message":{"content":"Usable answer"}}],"usage":\#(usage)}"#

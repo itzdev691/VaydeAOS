@@ -5,10 +5,25 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
         case compatibleAPI
         case chatGPT
     }
+    public enum ReasoningEffort: String, Codable, CaseIterable, Sendable {
+        case automatic, none, minimal, low, medium, high, xhigh, max
+
+        public var label: String {
+            switch self {
+            case .automatic: return "Auto"
+            case .xhigh: return "Extra high"
+            default: return rawValue.capitalized
+            }
+        }
+
+        /// Omit the parameter in Auto so each model keeps its own default.
+        public var requestValue: String? { self == .automatic ? nil : rawValue }
+    }
     public var baseURL: String
     public var model: String
     public var provider: Provider
     public var chatGPTModel: String?
+    public var reasoningEffort: ReasoningEffort
     public var activeModel: String { provider == .chatGPT ? chatGPTModel ?? "Choose a ChatGPT model" : model }
     public var connectionLabel: String { provider == .chatGPT ? "ChatGPT plan" : baseURL }
 
@@ -17,14 +32,16 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
         model: "qwen3.5:9b"
     )
 
-    public init(baseURL: String, model: String, provider: Provider = .compatibleAPI, chatGPTModel: String? = nil) {
+    public init(baseURL: String, model: String, provider: Provider = .compatibleAPI, chatGPTModel: String? = nil,
+                reasoningEffort: ReasoningEffort = .automatic) {
         self.baseURL = baseURL
         self.model = model
         self.provider = provider
         self.chatGPTModel = chatGPTModel
+        self.reasoningEffort = reasoningEffort
     }
 
-    private enum CodingKeys: String, CodingKey { case baseURL, model, provider, chatGPTModel }
+    private enum CodingKeys: String, CodingKey { case baseURL, model, provider, chatGPTModel, reasoningEffort }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -32,6 +49,7 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
         model = try values.decode(String.self, forKey: .model)
         provider = try values.decodeIfPresent(Provider.self, forKey: .provider) ?? .compatibleAPI
         chatGPTModel = try values.decodeIfPresent(String.self, forKey: .chatGPTModel)
+        reasoningEffort = try values.decodeIfPresent(ReasoningEffort.self, forKey: .reasoningEffort) ?? .automatic
     }
 
     public func validated() throws -> ConnectionSettings {
@@ -93,7 +111,8 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
         guard let normalizedURL = components.url?.absoluteString else {
             throw ConnectionSettingsError.invalidURL
         }
-        return ConnectionSettings(baseURL: normalizedURL, model: selectedModel, provider: provider, chatGPTModel: planModel)
+        return ConnectionSettings(baseURL: normalizedURL, model: selectedModel, provider: provider,
+                                  chatGPTModel: planModel, reasoningEffort: reasoningEffort)
     }
 
     private static func isLoopback(_ host: String) -> Bool {

@@ -253,7 +253,8 @@ struct ConnectionSettingsView: View {
     private func save(rememberAPIKey: Bool = true) {
         do {
             let settings = try ConnectionSettings(baseURL: baseURL, model: model,
-                provider: provider, chatGPTModel: chatGPTModel.isEmpty ? nil : chatGPTModel).validated()
+                provider: provider, chatGPTModel: chatGPTModel.isEmpty ? nil : chatGPTModel,
+                reasoningEffort: session.settings.reasoningEffort).validated()
             if rememberAPIKey && provider == .compatibleAPI {
                 try loadCredentialIfNeeded(for: settings)
             }

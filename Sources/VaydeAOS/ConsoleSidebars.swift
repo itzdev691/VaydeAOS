@@ -87,6 +87,7 @@ struct SessionSidebar: View {
     @ObservedObject var telemetry: SystemTelemetry
     @Binding var showingConnectionSettings: Bool
     @State private var showAllInterfaces = false
+    @State private var reasoningError: String?
 
     private var interfaces: [SystemTelemetry.NetworkInterface] {
         let active = telemetry.interfaces.filter { $0.isUp && !$0.addresses.isEmpty }.sorted {
@@ -116,6 +117,7 @@ struct SessionSidebar: View {
                         Rectangle().fill(Console.line).frame(height: 1)
                         InstrumentRow(label: "REQUEST", value: session.isSending ? "RUNNING" : session.errorMessage != nil ? "ATTENTION" : "STANDBY", color: session.errorMessage != nil ? Console.amber : Console.green)
                         InstrumentRow(label: "CONTEXT", value: "\(session.messages.count) messages")
+                        reasoningControl
                         Button { showingConnectionSettings = true } label: {
                             HStack { Text("CONFIGURE UPLINK"); Spacer(); Image(systemName: "arrow.up.right") }
                         }.buttonStyle(ConsoleButtonStyle()).disabled(session.isSending)
@@ -155,6 +157,36 @@ struct SessionSidebar: View {
                     AmbientGraphic(style: .core).frame(height: 176)
                 }
             }
+        }
+    }
+
+    private var reasoningControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            InstrumentRow(label: "REASONING MODE", value: session.settings.reasoningEffort.label.uppercased(), color: Console.blue)
+            Slider(value: Binding(
+                get: { Double(ConnectionSettings.ReasoningEffort.allCases.firstIndex(of: session.settings.reasoningEffort) ?? 0) },
+                set: { value in
+                    do {
+                        try session.setReasoningEffort(ConnectionSettings.ReasoningEffort.allCases[Int(value.rounded())])
+                        reasoningError = nil
+                    } catch {
+                        reasoningError = "Could not save reasoning mode. \(error.localizedDescription)"
+                    }
+                }
+            ), in: 0...Double(ConnectionSettings.ReasoningEffort.allCases.count - 1), step: 1)
+            .controlSize(.small)
+            .tint(Console.blue)
+            .accessibilityLabel("Reasoning mode")
+            .accessibilityValue(session.settings.reasoningEffort.label)
+            .disabled(session.isSending || session.chatGPT.isBusy)
+            HStack {
+                Text("AUTO")
+                Spacer()
+                Text("MAX")
+            }.font(Console.mono(8)).foregroundStyle(Console.muted)
+            Text(reasoningError ?? "Auto uses the model default. Available levels depend on the model.")
+                .font(Console.mono(8)).foregroundStyle(reasoningError == nil ? Console.muted : Console.amber)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

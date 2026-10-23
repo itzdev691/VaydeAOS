@@ -50,6 +50,7 @@ public struct ChatGPTHelperRequest: Encodable, Sendable {
     public var newProfile: Bool?
     public var reconsent: Bool?
     public var model: String?
+    public var reasoningEffort: String?
     public var messages: [ChatMessage]?
     public init(method: String) { self.method = method }
 }

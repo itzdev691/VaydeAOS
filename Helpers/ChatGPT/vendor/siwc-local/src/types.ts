@@ -74,6 +74,7 @@ export interface ResponseInputMessage {
 
 export interface StreamResponseOptions {
   model: string;
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   input: string | ResponseInputMessage[];
   instructions?: string;
   signal?: AbortSignal;

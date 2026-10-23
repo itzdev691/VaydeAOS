@@ -12,6 +12,19 @@ function sse(wire, headers = { 'content-type': 'text/event-stream', 'x-request-i
   return new Response(new TextEncoder().encode(wire), { headers });
 }
 
+test('selected reasoning effort reaches Responses and omission preserves the model default', async (t) => {
+  const bodies = [];
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return sse(frame(delta('answer')) + frame(completed));
+  });
+  for (const effort of [undefined, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+    await request(effort === undefined ? {} : { reasoningEffort: effort });
+    if (effort === undefined) assert.equal(Object.hasOwn(bodies.at(-1), 'reasoning'), false);
+    else assert.deepEqual(bodies.at(-1).reasoning, { effort });
+  }
+});
+
 test('streams text safely with OAuth and explicit direct-route settings, ignoring API-key environment', async (t) => {
   const ambient = {
     OPENAI_API_KEY: 'ambient-key', OPENAI_ADMIN_KEY: 'ambient-admin-key', OPENAI_BASE_URL: 'https://wrong.invalid/v1',

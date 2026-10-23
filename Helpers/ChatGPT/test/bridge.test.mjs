@@ -14,6 +14,25 @@ function fixture(overrides = {}) {
   return { output, client, bridge: createBridge(client, value => output.push(value)) };
 }
 
+test('reasoning selection reaches the SDK and invalid efforts are rejected', async () => {
+  const efforts = [];
+  const { bridge, output } = fixture({ streamResponse: async options => {
+    efforts.push(options.reasoningEffort);
+    return { text: 'Reply' };
+  } });
+  for (const effort of [undefined, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+    await bridge.dispatch({ id: `effort-${effort}`, method: 'reply', model: 'test',
+      messages: [{ role: 'user', content: 'Prompt' }],
+      ...(effort === undefined ? {} : { reasoningEffort: effort }) });
+    assert.equal(output.at(-1).text, 'Reply');
+  }
+  assert.deepEqual(efforts, [undefined, 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  await bridge.dispatch({ id: 'invalid-effort', method: 'reply', model: 'test',
+    messages: [{ role: 'user', content: 'Prompt' }], reasoningEffort: 'invalid' });
+  assert.equal(output.at(-1).error.code, 'invalid_request');
+  assert.equal(efforts.length, 8);
+});
+
 test('display snapshots exclude credentials, grants and arbitrary SDK fields', async () => {
   const { bridge, output } = fixture();
   await bridge.dispatch({ id: '1', method: 'state' });

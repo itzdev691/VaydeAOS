@@ -7,6 +7,18 @@ struct ConnectionSettingsTests {
         #expect(try ConnectionSettings.local.validated() == .local)
     }
 
+    @Test func testReasoningEffortSurvivesValidationAndPersistence() throws {
+        for effort in ConnectionSettings.ReasoningEffort.allCases {
+            var settings = ConnectionSettings.local
+            settings.reasoningEffort = effort
+            let normalized = try settings.validated()
+            let decoded = try JSONDecoder().decode(ConnectionSettings.self, from: JSONEncoder().encode(normalized))
+            #expect(decoded.reasoningEffort == effort)
+        }
+        let legacy = Data(#"{"baseURL":"http://127.0.0.1:11434/v1","model":"local-model"}"#.utf8)
+        #expect(try JSONDecoder().decode(ConnectionSettings.self, from: legacy).reasoningEffort == .automatic)
+    }
+
     @Test func testNormalizationTrimsURLModelAndTrailingSlashes() throws {
         let settings = try ConnectionSettings(
             baseURL: " HTTPS://API.EXAMPLE.COM:443/v1/// \n",
