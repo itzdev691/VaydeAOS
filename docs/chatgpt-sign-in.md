@@ -1,4 +1,10 @@
-# ChatGPT plan provider
+# Legacy ChatGPT helper (historical)
+
+The app now uses one ChatGPT connection backed by the embedded Codex runtime.
+The Node helper described below is no longer launched or packaged. Its existing
+credential files remain untouched. See [the current runtime integration](codex-runtime.md).
+
+# Original ChatGPT plan provider
 
 The native Connection Settings panel supports ChatGPT browser sign-in, separate
 plan-usage authorization, saved profiles, model discovery, reconnect, usage

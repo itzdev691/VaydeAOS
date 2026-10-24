@@ -20,10 +20,10 @@ struct VaydeAOSApp: App {
                 ConnectionSettingsView(session: session)
             }
             .task {
-                if session.settings.provider == .chatGPT { session.chatGPT.refresh() }
+                if session.settings.provider == .chatGPT { await session.codex.refresh(settings: session.settings) }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                Task { await session.chatGPT.shutdown() }
+                session.codex.shutdown()
             }
         }
         .defaultSize(width: 1460, height: 980)

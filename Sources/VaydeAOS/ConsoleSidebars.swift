@@ -108,7 +108,7 @@ struct SessionSidebar: View {
                             Image(systemName: "cpu").font(.system(size: 25, weight: .ultraLight)).foregroundStyle(Console.blue)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(session.settings.activeModel).font(Console.mono(13, weight: .medium)).lineLimit(2)
-                                Text(session.settings.provider == .chatGPT ? "RESPONSES / CHATGPT PLAN" : "CHAT COMPLETIONS")
+                                Text(session.settings.provider == .chatGPT ? "CHATGPT / AGENT RUNTIME" : "CHAT COMPLETIONS")
                                     .font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
                             }
                         }
@@ -178,7 +178,7 @@ struct SessionSidebar: View {
             .tint(Console.blue)
             .accessibilityLabel("Reasoning mode")
             .accessibilityValue(session.settings.reasoningEffort.label)
-            .disabled(session.isSending || session.chatGPT.isBusy)
+            .disabled(session.isSending || session.codex.isChecking || session.codex.isRunning)
             HStack {
                 Text("AUTO")
                 Spacer()

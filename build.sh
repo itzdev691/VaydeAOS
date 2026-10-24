@@ -25,7 +25,11 @@ ditto "$binary_dir/$resource_bundle" "$app_dir/Contents/Resources/$resource_bund
 if [ -L "$app_dir/$resource_bundle" ]; then
     rm "$app_dir/$resource_bundle"
 fi
-sh "$project_dir/scripts/prepare-chatgpt-helper.sh"
+# The unified ChatGPT connection is owned by Codex; remove obsolete helper resources.
+if [ -d "$app_dir/Contents/Resources/ChatGPT" ]; then
+    rm -rf "$app_dir/Contents/Resources/ChatGPT"
+fi
+python3 "$project_dir/scripts/prepare-codex-runtime.py"
 codesign --force --sign - "$app_dir"
 
 printf 'Built %s\n' "$app_dir"

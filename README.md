@@ -3,16 +3,16 @@
 A native macOS command center written in Swift and SwiftUI, with a VaydeNet navy, blue, and red
 console, live system instruments, and an integrated model chat channel. Connection settings support
 local Ollama and servers that implement the OpenAI-compatible Chat Completions
-API. A separate **ChatGPT plan** provider supports browser sign-in and eligible
-plan usage through OpenAI's local Sign in with ChatGPT SDK.
+API. One **ChatGPT** connection supports conversation and agent tools through the
+bundled Codex runtime, with browser sign-in and eligible ChatGPT plan usage.
 
 ## Build and run
 
 Requires macOS 13 or later and Swift 6 or later from Xcode Command Line Tools
 (`xcode-select --install`). No external Swift packages are required.
-The build downloads a checksum-pinned Node 22 runtime from nodejs.org and installs
-locked helper dependencies from npm. Internet access is required for this step.
-Node and the credential utility are bundled; users need no separate Node installation.
+The build uses Python 3.9+ to download a checksum-pinned official Codex runtime
+from npm. Internet access is required for the first build. The runtime is bundled;
+users need no separate Codex or Node installation.
 
 From the repository root:
 
@@ -53,17 +53,28 @@ as required status checks after the workflow has been pushed and run on GitHub.
 
 ## Connect a model
 
-For ChatGPT, open **Connection Settings → ChatGPT plan → Continue with ChatGPT**.
-Complete browser sign-in and authorize plan usage, choose an available model,
-then save. **Manage usage** opens ChatGPT usage settings. Saved connections,
-account switching, reconnect, and sign-out are available in the same panel.
-Identity-only consent leaves plan requests disabled. Existing ChatGPT conversations
-are not imported. The API configuration is retained when switching providers.
+Open **Connection Settings → ChatGPT**. One account and model selection serve
+conversation and agent tools. **Continue with ChatGPT** connects the account;
+**Manage usage** opens ChatGPT usage settings. An existing ChatGPT account in
+Codex on this Mac is reused. Signing out disconnects that shared account.
 
-ChatGPT responses stream into the chat, and only completed responses are saved.
-Requests use the public Responses API with storage disabled and full conversation
-history. Plan eligibility and usage limits apply; API-key billing remains separate.
-The vendored DevKit has a noncommercial license. See [implementation and validation](docs/chatgpt-sign-in.md).
+The workspace folder is optional. Without one, the runtime uses a private,
+read-only chat workspace. Selecting a folder supplies task context; workspace
+writes are optional. Chat shows tool activity and approval controls. Stop
+interrupts the runtime; completed actions are not undone.
+
+Older **ChatGPT plan** and **Codex runtime** settings migrate to this one connection,
+preserving the selected model and visible conversation. Former direct-chat settings
+start with read-only execution and require confirming the displayed account before
+sending. Old helper credential files remain untouched;
+they are not imported into Codex or used as an automatic fallback.
+
+Builds bundle checksum-pinned Codex 0.164.0 for the host architecture. Only completed
+assistant turns are saved. Model access and usage limits remain account-dependent;
+API-key billing stays separate. Runtime integration is experimental, and some
+plugins require capabilities of their original host. See
+[runtime integration](docs/codex-runtime.md) for authentication, permission
+boundaries, history, migration, and validation.
 
 Open the header settings control or **Configure Uplink** to set the API base URL, model name, and optional API key.
 

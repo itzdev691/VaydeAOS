@@ -7,7 +7,9 @@ struct ConnectionSettingsView: View {
     @State private var baseURL: String
     @State private var model: String
     @State private var provider: ConnectionSettings.Provider
-    @State private var chatGPTModel: String
+    @State private var codexModel: String
+    @State private var codexWorkspace: String
+    @State private var codexAllowsWrites: Bool
     @State private var apiKey = ""
     @State private var errorMessage: String?
     @State private var credentialEndpoint: String?
@@ -31,7 +33,9 @@ struct ConnectionSettingsView: View {
         _baseURL = State(initialValue: session.settings.baseURL)
         _model = State(initialValue: session.settings.model)
         _provider = State(initialValue: session.settings.provider)
-        _chatGPTModel = State(initialValue: session.settings.chatGPTModel ?? "")
+        _codexModel = State(initialValue: session.settings.selectedChatGPTModel)
+        _codexWorkspace = State(initialValue: session.settings.codexWorkspace)
+        _codexAllowsWrites = State(initialValue: session.settings.codexAllowsWrites)
     }
 
     var body: some View {
@@ -57,13 +61,18 @@ struct ConnectionSettingsView: View {
 
             Picker("Provider", selection: $provider) {
                 Text("Ollama / API key").tag(ConnectionSettings.Provider.compatibleAPI)
-                Text("ChatGPT plan").tag(ConnectionSettings.Provider.chatGPT)
+                Text("ChatGPT").tag(ConnectionSettings.Provider.chatGPT)
             }
             .pickerStyle(.segmented)
-            .disabled(session.chatGPT.isBusy)
+            .disabled(session.codex.isRunning)
 
             if provider == .chatGPT {
-                ChatGPTAccountView(account: session.chatGPT, model: $chatGPTModel)
+                if session.settings.needsChatGPTAccountReview {
+                    Text("The connections were merged. Verify the account shown below, then save to use it for this conversation.")
+                        .font(.system(size: 12)).foregroundStyle(Console.amber).fixedSize(horizontal: false, vertical: true)
+                }
+                ChatGPTConnectionView(runtime: session.codex, model: $codexModel, workspace: $codexWorkspace,
+                    allowsWrites: $codexAllowsWrites, settings: session.settings)
             } else {
                 compatibleAPIFields
             }
@@ -105,11 +114,11 @@ struct ConnectionSettingsView: View {
                     model = ConnectionSettings.local.model
                 }
                 .buttonStyle(ConnectionButtonStyle(accent: accent))
-                .disabled(session.chatGPT.isBusy)
+                .disabled(session.codex.isRunning)
                 .help("Use the local Ollama API and default model")
                 Spacer()
                 Button("Cancel", role: .cancel) {
-                    session.chatGPT.cancel()
+                    Task { await session.codex.cancelLogin() }
                     dismiss()
                 }
                 .buttonStyle(ConnectionButtonStyle(accent: accent))
@@ -119,9 +128,11 @@ struct ConnectionSettingsView: View {
                 }
                 .buttonStyle(ConnectionButtonStyle(accent: accent, primary: true))
                 .keyboardShortcut(.defaultAction)
-                .disabled(session.chatGPT.isBusy || (provider == .chatGPT
-                    ? !session.chatGPT.session.canUsePlan || !session.chatGPT.models.contains(where: { $0.slug == chatGPTModel })
-                    : baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                .disabled(session.codex.isChecking || session.codex.isRunning
+                    || (provider == .chatGPT && session.settings.needsChatGPTAccountReview && !session.codex.isSignedIn)
+                    || (provider == .compatibleAPI
+                    && (baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)))
             }
         }
         .padding(28)
@@ -252,9 +263,11 @@ struct ConnectionSettingsView: View {
 
     private func save(rememberAPIKey: Bool = true) {
         do {
-            let settings = try ConnectionSettings(baseURL: baseURL, model: model,
-                provider: provider, chatGPTModel: chatGPTModel.isEmpty ? nil : chatGPTModel,
-                reasoningEffort: session.settings.reasoningEffort).validated()
+            var settings = try ConnectionSettings(baseURL: baseURL, model: model,
+                provider: provider, chatGPTModel: codexModel.isEmpty ? nil : codexModel,
+                reasoningEffort: session.settings.reasoningEffort, codexModel: codexModel,
+                codexWorkspace: codexWorkspace, codexAllowsWrites: codexAllowsWrites).validated()
+            settings.needsChatGPTAccountReview = session.settings.needsChatGPTAccountReview
             if rememberAPIKey && provider == .compatibleAPI {
                 try loadCredentialIfNeeded(for: settings)
             }

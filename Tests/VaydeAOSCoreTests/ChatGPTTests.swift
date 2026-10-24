@@ -18,9 +18,7 @@ struct ChatGPTTests {
         #expect(normalized.model == "api-model")
         #expect(normalized.activeModel == "plan-model")
         #expect(try JSONDecoder().decode(ConnectionSettings.self, from: JSONEncoder().encode(normalized)) == normalized)
-        #expect(throws: ConnectionSettingsError.missingModel) {
-            try ConnectionSettings(baseURL: settings.baseURL, model: settings.model, provider: .chatGPT).validated()
-        }
+        #expect(try ConnectionSettings(baseURL: settings.baseURL, model: settings.model, provider: .chatGPT).validated().activeModel == "ChatGPT default")
     }
 
     @Test func APIClientRefusesPlanSettingsBeforeNetwork() async throws {
@@ -29,37 +27,6 @@ struct ChatGPTTests {
             _ = try await ChatClient().reply(to: [], settings: settings, apiKey: "must-not-send")
             Issue.record("API client accepted ChatGPT settings")
         } catch { #expect((error as? ChatGPTHelperError)?.code == "wrong_provider") }
-    }
-
-    @Test @MainActor func planRequestsNeverReadOrWriteAPIKeychainAndKeepCompletedHistory() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let helper = FakePlanHelper()
-        let account = ChatGPTAccount(helper: helper)
-        account.refresh()
-        try await waitUntil { !account.isBusy }
-        let credentials = ForbiddenAPICredentials()
-        let session = ChatSession(store: LocalStore(directory: directory), credentials: credentials, chatGPT: account)
-        let settings = ConnectionSettings(baseURL: "https://api.example.com/v1", model: "api-model", provider: .chatGPT, chatGPTModel: "plan-model")
-        try session.saveSettings(settings, apiKey: "ignored")
-        #expect(try session.apiKey(for: settings) == nil)
-        try session.setReasoningEffort(.high)
-        #expect(try LocalStore(directory: directory).loadSettings()?.reasoningEffort == .high)
-        session.draft = "First prompt"
-        session.send()
-        await session.sendTask?.value
-        #expect(session.messages.map(\.content) == ["First prompt", "Completed reply"])
-        session.draft = "Follow-up"
-        session.send()
-        await session.sendTask?.value
-        let requests = await helper.requests.filter { $0.method == "reply" }
-        #expect(requests.allSatisfy { $0.reasoningEffort == "high" })
-        #expect(requests.last?.messages?.map(\.content) == ["First prompt", "Completed reply", "Follow-up"])
-        #expect(session.partialReply.isEmpty)
-        #expect(try LocalStore(directory: directory).loadMessages() == session.messages)
-        #expect(credentials.calls == 0)
-        #expect(session.performanceHistory.count == 2)
-        #expect(session.performanceHistory.allSatisfy { $0.inputTokens == nil })
     }
 
     @Test @MainActor func reasoningSelectionPersistsWithoutAccessingCredentials() throws {
@@ -81,58 +48,11 @@ struct ChatGPTTests {
         try await waitUntil { !account.isBusy }
         #expect(account.session.status == "connected")
         #expect(!account.session.canUsePlan)
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let session = ChatSession(store: LocalStore(directory: directory), credentials: ForbiddenAPICredentials(), chatGPT: account)
-        #expect(throws: ChatGPTHelperError.self) {
-            try session.saveSettings(ConnectionSettings(baseURL: ConnectionSettings.local.baseURL, model: "local", provider: .chatGPT, chatGPTModel: "plan-model"), apiKey: "")
-        }
+        do {
+            _ = try await account.reply(to: [ChatMessage(role: .user, content: "Blocked")], model: "plan-model") { _ in }
+            Issue.record("Legacy helper accepted identity-only consent")
+        } catch { #expect((error as? ChatGPTHelperError)?.code == "sign_in_required") }
         #expect(await helper.requests.allSatisfy { $0.method != "models" && $0.method != "reply" })
-    }
-
-    @Test @MainActor func cancelledPlanReplyDiscardsPartialTextAndIgnoresLateCompletion() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let helper = FakePlanHelper(holdReply: true)
-        let account = ChatGPTAccount(helper: helper)
-        account.refresh()
-        try await waitUntil { !account.isBusy }
-        let session = ChatSession(store: LocalStore(directory: directory), credentials: ForbiddenAPICredentials(), chatGPT: account)
-        try session.saveSettings(ConnectionSettings(baseURL: ConnectionSettings.local.baseURL, model: "local", provider: .chatGPT, chatGPTModel: "plan-model"), apiKey: "")
-        session.draft = "  Preserve my prompt\n"
-        session.send()
-        let running = try #require(session.sendTask)
-        try await waitUntil { !session.partialReply.isEmpty }
-        #expect(session.partialReply == "Partial")
-        #expect(session.messages.isEmpty)
-        session.stop()
-        #expect(session.partialReply.isEmpty)
-        #expect(session.draft == "  Preserve my prompt\n")
-        await helper.finishReply()
-        await running.value
-        #expect(session.messages.isEmpty)
-        #expect(try LocalStore(directory: directory).loadMessages().isEmpty)
-        #expect(session.performanceHistory.map(\.outcome) == [.cancelled])
-    }
-
-    @Test @MainActor func failedPlanReplyPreservesPromptAndDoesNotSavePartialOutput() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let helper = FakePlanHelper(failReply: true)
-        let account = ChatGPTAccount(helper: helper)
-        account.refresh()
-        try await waitUntil { !account.isBusy }
-        let session = ChatSession(store: LocalStore(directory: directory), credentials: ForbiddenAPICredentials(), chatGPT: account)
-        try session.saveSettings(ConnectionSettings(baseURL: ConnectionSettings.local.baseURL, model: "local", provider: .chatGPT, chatGPTModel: "plan-model"), apiKey: "")
-        session.draft = "Retry me"
-        session.send()
-        await session.sendTask?.value
-        #expect(session.messages.isEmpty)
-        #expect(session.partialReply.isEmpty)
-        #expect(session.draft == "Retry me")
-        #expect(session.errorMessage?.contains("Usage limit") == true)
-        #expect(try LocalStore(directory: directory).loadMessages().isEmpty)
-        #expect(session.performanceHistory.map(\.outcome) == [.failed])
     }
 
     @Test func missingBundleHelperFailsWithoutLaunchingSystemNode() async {

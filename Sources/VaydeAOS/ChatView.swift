@@ -253,7 +253,7 @@ struct ChatView: View {
                     Image(systemName: "terminal").foregroundStyle(Console.blue)
                     Text(session.settings.activeModel).foregroundStyle(Console.text).lineLimit(1)
                     if session.settings.provider == .chatGPT {
-                        Link(session.chatGPT.session.canUsePlan ? "Using ChatGPT plan" : "ChatGPT connection required",
+                        Link(session.codex.isSignedIn ? "Using ChatGPT plan" : "ChatGPT connection required",
                              destination: ChatGPTAccount.usageURL).foregroundStyle(Console.blue)
                     }
                     Text("/ \(session.messages.count) messages").foregroundStyle(Console.muted)
@@ -306,12 +306,15 @@ struct ChatView: View {
                         if !session.partialReply.isEmpty {
                             MessageRow(message: ChatMessage(role: .assistant, content: session.partialReply))
                         }
+                        if session.settings.provider == .chatGPT { CodexTaskView(runtime: session.codex) }
                         HStack(spacing: 10) {
                             ProgressView().controlSize(.small)
-                            Text(session.partialReply.isEmpty ? "Awaiting model response…" : "Receiving response…").font(Console.mono(11)).foregroundStyle(Console.blue)
+                            Text(session.settings.provider == .chatGPT && !session.codex.prompts.isEmpty
+                                 ? "Waiting for your input…"
+                                 : session.partialReply.isEmpty ? "Awaiting model response…" : "Receiving response…").font(Console.mono(11)).foregroundStyle(Console.blue)
                             Spacer()
                         }
-                    }
+                    } else if session.settings.provider == .chatGPT { CodexTaskView(runtime: session.codex) }
                     Color.clear.frame(height: 1).id("conversation-bottom").accessibilityHidden(true)
                 }.padding(18)
             }
@@ -320,6 +323,8 @@ struct ChatView: View {
             .onChange(of: session.messages.count) { _ in scrollToBottom(proxy) }
             .onChange(of: session.pendingMessage?.id) { _ in scrollToBottom(proxy) }
             .onChange(of: session.partialReply) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.codex.prompts.count) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.codex.activity.count) { _ in scrollToBottom(proxy) }
         }
     }
 

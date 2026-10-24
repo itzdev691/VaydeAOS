@@ -26,7 +26,7 @@ public struct LocalStore: Sendable {
         try save(messages, to: "conversation.json")
     }
 
-    private func load<Value: Decodable>(_ type: Value.Type, from filename: String) throws -> Value? {
+    func load<Value: Decodable>(_ type: Value.Type, from filename: String) throws -> Value? {
         let url = directory.appendingPathComponent(filename)
         do {
             return try JSONDecoder().decode(type, from: Data(contentsOf: url))
@@ -35,7 +35,7 @@ public struct LocalStore: Sendable {
         }
     }
 
-    private func save<Value: Encodable>(_ value: Value, to filename: String) throws {
+    func save<Value: Encodable>(_ value: Value, to filename: String) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(value)

@@ -21,8 +21,8 @@ public final class ChatSession: ObservableObject {
     private let client: any ChatServing
     private let store: LocalStore
     private let credentials: any CredentialStoring
-    public let chatGPT: ChatGPTAccount
-    private var accountChanges: AnyCancellable?
+    public let codex: CodexRuntime
+    private var runtimeChanges: AnyCancellable?
     private var activeRequest: ActiveRequest?
     private var settingsLoadIssue: String?
     private var messagesLoadIssue: String?
@@ -39,12 +39,12 @@ public final class ChatSession: ObservableObject {
         client: any ChatServing = ChatClient(),
         store: LocalStore = LocalStore(),
         credentials: any CredentialStoring = KeychainCredentialStore(),
-        chatGPT: ChatGPTAccount? = nil
+        codex: CodexRuntime? = nil
     ) {
         self.client = client
         self.store = store
         self.credentials = credentials
-        self.chatGPT = chatGPT ?? ChatGPTAccount()
+        self.codex = codex ?? CodexRuntime(store: store)
 
         do {
             if let saved = try store.loadSettings() {
@@ -60,13 +60,16 @@ public final class ChatSession: ObservableObject {
             messagesLoadIssue = "Could not load the saved conversation: \(error.localizedDescription) Start a New Chat to replace the existing file."
         }
         errorMessage = loadIssues
-        accountChanges = self.chatGPT.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        if settings.needsChatGPTAccountReview {
+            notice = "The ChatGPT connections were merged. Confirm the displayed account in Connection Settings before sending."
+        }
+        runtimeChanges = self.codex.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     public var canSend: Bool {
         !isSending && activeRequest == nil && loadIssues == nil
-            && (settings.provider != .chatGPT || (!chatGPT.isBusy && chatGPT.session.canUsePlan
-                && chatGPT.models.contains(where: { $0.slug == settings.chatGPTModel })))
+            && (settings.provider != .chatGPT || (!codex.isRunning && !codex.isChecking
+                && !settings.needsChatGPTAccountReview && (!codex.hasCheckedAccount || codex.isSignedIn)))
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -105,14 +108,10 @@ public final class ChatSession: ObservableObject {
                 self?.performanceRequestStartedAt = ProcessInfo.processInfo.systemUptime
                 let response: ChatReply
                 if connection.provider == .chatGPT {
-                    guard let account = self?.chatGPT else { return }
-                    response = try await account.reply(to: conversation, model: connection.activeModel,
-                                                       reasoningEffort: connection.reasoningEffort) { [weak self] delta in
-                        Task { @MainActor [weak self] in
-                            guard self?.activeRequest?.id == request.id,
-                                  delta.utf8.count >= (self?.partialReply.utf8.count ?? 0) else { return }
-                            self?.partialReply = delta
-                        }
+                    guard let runtime = self?.codex else { return }
+                    response = try await runtime.reply(to: conversation, settings: connection) { [weak self] text in
+                        guard self?.activeRequest?.id == request.id else { return }
+                        self?.partialReply = text
                     }
                 } else {
                     response = try await client.measuredReply(to: conversation, settings: connection, apiKey: apiKey)
@@ -141,15 +140,17 @@ public final class ChatSession: ObservableObject {
     public func stop() {
         guard let request = activeRequest else { return }
         sendTask?.cancel()
+        if settings.provider == .chatGPT { codex.cancel() }
         recordPerformance(outcome: .cancelled)
         clearActiveRequest()
         draft = request.originalDraft
         errorMessage = nil
-        notice = "Generation stopped. Your message is ready to send again."
+        notice = cancellationNotice
     }
 
     public func newChat() {
         sendTask?.cancel()
+        codex.newChat()
         recordPerformance(outcome: .cancelled)
         clearActiveRequest()
         draft = ""
@@ -183,7 +184,7 @@ public final class ChatSession: ObservableObject {
     }
 
     public func setReasoningEffort(_ effort: ConnectionSettings.ReasoningEffort) throws {
-        guard !isSending, !chatGPT.isBusy else { throw SessionError.requestInProgress }
+        guard !isSending, !codex.isRunning, !codex.isChecking else { throw SessionError.requestInProgress }
         // Preserve an unreadable settings file until Connection Settings repairs it.
         guard settingsLoadIssue == nil else {
             throw CocoaError(.fileReadCorruptFile)
@@ -202,19 +203,19 @@ public final class ChatSession: ObservableObject {
         rememberAPIKey: Bool = true
     ) throws {
         notice = nil
-        guard !isSending, !chatGPT.isBusy else { throw SessionError.requestInProgress }
-        let connection = try settings.validated()
+        guard !isSending, !codex.isRunning, !codex.isChecking else { throw SessionError.requestInProgress }
+        var connection = try settings.validated()
         if connection.provider == .chatGPT {
-            guard chatGPT.session.canUsePlan,
-                  chatGPT.models.contains(where: { $0.slug == connection.chatGPTModel }) else {
-                throw ChatGPTHelperError(code: "sign_in_required", message: "Connect ChatGPT, authorize plan usage, and select an available model.")
+            if connection.needsChatGPTAccountReview {
+                guard codex.isSignedIn else { throw CodexRuntimeError.signInRequired }
+                connection.needsChatGPTAccountReview = false
             }
             try store.saveSettings(connection)
             if self.settings != connection { performanceHistory = [] }
             self.settings = connection
             settingsLoadIssue = nil
             errorMessage = messagesLoadIssue
-            notice = "Using ChatGPT plan."
+            notice = "ChatGPT connection saved. Agent tools use the bundled runtime."
             return
         }
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -268,7 +269,13 @@ public final class ChatSession: ObservableObject {
         clearActiveRequest()
         draft = request.originalDraft
         errorMessage = nil
-        notice = "Generation stopped. Your message is ready to send again."
+        notice = cancellationNotice
+    }
+
+    private var cancellationNotice: String {
+        settings.provider == .chatGPT
+            ? "Codex stopped. Completed tool actions were not undone. Inspect activity before resending."
+            : "Generation stopped. Your message is ready to send again."
     }
 
     private func recordPerformance(outcome: RequestPerformance.Outcome, reply: ChatReply? = nil) {
