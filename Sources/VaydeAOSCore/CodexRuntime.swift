@@ -96,11 +96,11 @@ public final class CodexRuntime: ObservableObject {
             errorMessage = "Could not load Codex task history. Start a New Chat to replace it."
         }
         process.onMessage = { [weak self] method, params, id in self?.receive(method, params, id) }
-        process.onDisconnect = { [weak self] in
+        process.onDisconnect = { [weak self] error in
             guard let self else { return }
             self.isConnected = false; self.connectedThreadID = nil
             self.loginID = nil; self.loginPending = false
-            if self.active != nil { self.finish(.failure(CodexRuntimeError.disconnected)) }
+            if self.active != nil { self.finish(.failure(error)) }
         }
     }
 

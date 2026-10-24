@@ -3,7 +3,9 @@ import Testing
 @testable import VaydeAOSCore
 
 @MainActor
-@Suite("Embedded Codex runtime")
+// These fixtures deliberately stall the shared main actor to exercise pipe
+// backpressure. Isolate their wall-clock cancellation checks from that stall.
+@Suite("Embedded Codex runtime", .serialized)
 final class CodexRuntimeTests {
     private let directory = FileManager.default.temporaryDirectory.appendingPathComponent("VaydeAOS-Codex-" + UUID().uuidString)
     init() throws { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
@@ -65,6 +67,101 @@ final class CodexRuntimeTests {
         let log = try requests()
         #expect(log.contains { $0["id"].text == "stale" && $0["error"] != .null })
         #expect(log.contains { $0["id"].text == "approve-1" && $0["result"]["decision"].text == "accept" })
+        runtime.shutdown()
+    }
+
+    @Test func stdoutBurstSurvivesASlowConsumer() async throws {
+        let runtime = try makeRuntime(mode: "burst")
+        defer { runtime.shutdown() }
+        var delayed = false
+        let reply = try await runtime.reply(to: [ChatMessage(role: .user, content: "Burst")], settings: configuration()) { _ in
+            if !delayed {
+                delayed = true
+                // Simulate UI work while the child emits more than 64 pipe chunks.
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
+        #expect(reply.content == "Final café")
+        #expect(runtime.isConnected)
+    }
+
+    @Test func completedResponseIsDrainedBeforeProcessExit() async throws {
+        let runtime = try makeRuntime(mode: "exitAfterComplete")
+        defer { runtime.shutdown() }
+        let reply = try await runtime.reply(to: [ChatMessage(role: .user, content: "Finish")], settings: configuration()) { _ in
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        #expect(reply.content == "Final café")
+    }
+
+    @Test(arguments: ["failSecond", "crashSecond", "malformedSecond"])
+    func interruptedResponseAndEarlierHistorySurviveRelaunchWithoutReplay(mode: String) async throws {
+        let store = LocalStore(directory: directory)
+        let runtime = try makeRuntime(mode: mode)
+        let session = ChatSession(store: store, codex: runtime)
+        try session.saveSettings(configuration(), apiKey: "")
+        session.draft = "First question"; session.send(); await session.sendTask?.value
+        let history = session.messages
+        session.draft = "  Second question\n"; session.send(); await session.sendTask?.value
+        #expect(session.messages == history)
+        let interrupted = try #require(session.interruptedTurns.last)
+        #expect(interrupted.message.content == "Second question")
+        #expect(interrupted.originalDraft == "  Second question\n")
+        #expect(interrupted.response?.content == "Partial café")
+        #expect(interrupted.afterMessageCount == history.count)
+        #expect(!interrupted.wasCancelled)
+        #expect(try store.loadMessages() == history)
+        if mode == "malformedSecond" { #expect(session.errorMessage?.contains("unsupported protocol") == true) }
+        if mode == "crashSecond" { #expect(session.errorMessage?.contains("status 3") == true) }
+        let attrs = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("interrupted-turns.json").path)
+        #expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+        #expect(try requests().filter { $0["method"].text == "turn/start" }.count == 2)
+        runtime.shutdown()
+
+        let nextRuntime = try makeRuntime()
+        let restored = ChatSession(store: store, codex: nextRuntime)
+        #expect(restored.messages == history)
+        #expect(restored.interruptedTurns == [interrupted])
+        #expect(restored.draft == "  Second question\n")
+        #expect(restored.notice?.contains("incomplete") == true)
+        // An explicit follow-up resumes the original thread; recovered text is not
+        // submitted as completed model history or replayed as an action request.
+        restored.draft = "Continue without repeating completed actions"
+        restored.send(); await restored.sendTask?.value
+        #expect(restored.errorMessage == nil)
+        #expect(restored.messages.count == history.count + 2)
+        #expect(restored.interruptedTurns == [interrupted])
+        let log = try requests()
+        #expect(log.filter { $0["method"].text == "thread/start" }.count == 1)
+        #expect(log.filter { $0["method"].text == "thread/resume" }.count == 1)
+        #expect(log.last { $0["method"].text == "turn/start" }?["params"]["input"].values.first?["text"].text == "Continue without repeating completed actions")
+        let afterSuccess = ChatSession(store: store)
+        #expect(afterSuccess.draft.isEmpty)
+        #expect(afterSuccess.interruptedTurns == [interrupted])
+        restored.newChat()
+        let cleared = ChatSession(store: store)
+        #expect(cleared.messages.isEmpty)
+        #expect(cleared.interruptedTurns.isEmpty)
+        nextRuntime.shutdown()
+    }
+
+    @Test func stoppedPartialResponseRemainsVisibleAndSaved() async throws {
+        let runtime = try makeRuntime(mode: "holdPartial")
+        let store = LocalStore(directory: directory)
+        let session = ChatSession(store: store, codex: runtime)
+        try session.saveSettings(configuration(), apiKey: "")
+        session.draft = "Stop while streaming"; session.send()
+        let task = try #require(session.sendTask)
+        try await wait { !session.partialReply.isEmpty }
+        session.stop(); await task.value
+        #expect(session.interruptedTurns.count == 1)
+        #expect(session.interruptedTurns.first?.wasCancelled == true)
+        #expect(session.interruptedTurns.first?.response?.content == "Partial café")
+        #expect(session.messages.isEmpty)
+        #expect(session.errorMessage == nil)
+        let restored = ChatSession(store: store)
+        #expect(restored.interruptedTurns == session.interruptedTurns)
+        #expect(restored.draft == "Stop while streaming")
         runtime.shutdown()
     }
 
@@ -357,7 +454,25 @@ for line in sys.stdin:
   out({'id':rid,'result':{'turn':{'id':'turn-'+str(turn)}}})
   event('turn/started',{'turn':{'id':'turn-'+str(turn),'status':'inProgress'}})
   if mode=='hold':continue
+  if mode=='holdPartial':
+   event('item/agentMessage/delta',{'itemId':'partial','delta':'Partial café'})
+   continue
+  if turn==2 and mode in ['failSecond','crashSecond','malformedSecond']:
+   event('item/agentMessage/delta',{'itemId':'partial','delta':'Partial café'})
+   if mode=='crashSecond':sys.exit(3)
+   if mode=='malformedSecond':os.write(1,b'bad-json\n')
+   else:event('turn/completed',{'turn':{'id':'turn-'+str(turn),'status':'failed'}})
+   continue
   if mode=='crash':sys.exit(3)
+  if mode=='burst':
+   event('item/agentMessage/delta',{'itemId':'burst','delta':'Starting'})
+   for i in range(512):
+    os.write(1,(json.dumps({'method':'fixture/progress','params':{'padding':'x'*4096}})+'\n').encode())
+   complete()
+   continue
+  if mode=='exitAfterComplete':
+   complete()
+   sys.exit(0)
   if mode=='malformed':os.write(1,b'bad-json\n');continue
   if mode=='failed':
    event('item/agentMessage/delta',{'itemId':'partial','delta':'Do not save'})

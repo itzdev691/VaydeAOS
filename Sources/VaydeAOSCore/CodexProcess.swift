@@ -36,11 +36,13 @@ enum CodexValue: Codable, Equatable, Sendable {
 
 public enum CodexRuntimeError: LocalizedError {
     case unavailable, disconnected, invalidProtocol, timedOut, requestFailed(String), turnFailed, busy, emptyReply, signInRequired, accountReviewRequired
+    case processExited(status: Int32, signaled: Bool)
     public var errorDescription: String? {
         switch self {
         case .unavailable: return "The bundled Codex runtime is missing. Rebuild VaydeAOS with its runtime packaging step."
         case .disconnected: return "Codex disconnected. Completed tool actions may remain; inspect the activity before retrying."
         case .invalidProtocol: return "Codex returned an unsupported protocol message."
+        case .processExited(let status, let signaled): return "Codex exited with \(signaled ? "signal" : "status") \(status). Completed tool actions may remain; inspect the activity before retrying."
         case .timedOut: return "Codex timed out. Completed tool actions may remain."
         case .requestFailed(let method): return "Codex could not complete \(method). Check its account, model, workspace, and MCP configuration."
         case .turnFailed: return "The Codex turn failed. Completed tool actions may remain; inspect the activity before retrying."
@@ -56,12 +58,11 @@ public enum CodexRuntimeError: LocalizedError {
 @MainActor
 final class CodexProcess {
     var onMessage: ((String, CodexValue, CodexValue?) -> Void)?
-    var onDisconnect: (() -> Void)?
+    var onDisconnect: ((CodexRuntimeError) -> Void)?
     private let executable: URL?
     private let environment: [String: String]?
     private var child: Process?
     private var input: FileHandle?
-    private var reader: Task<Void, Never>?
     private var startup: Task<Void, Error>?
     private var generation = UUID()
     private var buffer = Data()
@@ -77,7 +78,6 @@ final class CodexProcess {
         self.executable = executable; self.environment = environment
     }
     deinit {
-        reader?.cancel()
         try? input?.close()
         if child?.isRunning == true { child?.terminate() }
         for item in pending.values { item.timer.cancel(); item.continuation.resume(throwing: CodexRuntimeError.disconnected) }
@@ -133,10 +133,9 @@ final class CodexProcess {
             "params": .object(["threadId": .string(thread), "turnId": .string(turn)])]))
     }
 
-    func stop() {
+    func stop(error: CodexRuntimeError = .disconnected) {
         generation = UUID()
         startup?.cancel(); startup = nil
-        reader?.cancel(); reader = nil
         try? input?.close(); input = nil
         if let child, child.isRunning {
             child.terminate()
@@ -148,8 +147,8 @@ final class CodexProcess {
         }
         child = nil; buffer = Data()
         let requests = pending; pending = [:]
-        for item in requests.values { item.timer.cancel(); item.continuation.resume(throwing: CodexRuntimeError.disconnected) }
-        onDisconnect?()
+        for item in requests.values { item.timer.cancel(); item.continuation.resume(throwing: error) }
+        onDisconnect?(error)
     }
 
     private func launch() throws {
@@ -167,35 +166,40 @@ final class CodexProcess {
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = stdin; process.standardOutput = stdout; process.standardError = FileHandle.nullDevice
         let current = UUID(); generation = current
-        process.terminationHandler = { [weak self] _ in
-            Task { @MainActor [weak self] in if self?.generation == current { self?.stop() } }
-        }
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         do { try process.run() } catch { throw CodexRuntimeError.unavailable }
         child = process; input = stdin.fileHandleForWriting
         try? stdin.fileHandleForReading.close(); try? stdout.fileHandleForWriting.close()
         let output = stdout.fileHandleForReading
-        // Pipe reads block. Keep them off Swift's cooperative executor, where several
-        // child processes can otherwise starve unrelated async work and cancellation.
-        let chunks = AsyncStream<Data>(bufferingPolicy: .bufferingOldest(64)) { continuation in
-            DispatchQueue(label: "VaydeAOS.Codex.stdout.\(current)").async {
-                defer { try? output.close(); continuation.finish() }
-                while true {
-                    let data = output.availableData
-                    if data.isEmpty { return }
-                    switch continuation.yield(data) {
-                    case .enqueued: break
-                    case .dropped, .terminated: return
-                    @unknown default: return
-                    }
+        // Read on a dedicated queue and acknowledge each chunk before reading more.
+        // The OS pipe supplies backpressure when the UI is busy: protocol bytes are
+        // never dropped, and memory does not grow with an unbounded stream queue.
+        DispatchQueue(label: "VaydeAOS.Codex.stdout.\(current)").async { [weak self] in
+            defer { try? output.close() }
+            while true {
+                let data = output.availableData
+                if data.isEmpty { break }
+                let consumed = DispatchSemaphore(value: 0)
+                Task { @MainActor [weak self] in
+                    defer { consumed.signal() }
+                    self?.receive(data, generation: current)
                 }
+                consumed.wait()
+            }
+            // EOF follows the final bytes. A process termination callback can run
+            // earlier and erase a completed turn before those bytes are consumed.
+            // Reaping can also lag EOF. Wait briefly off the main actor so an exit
+            // status is available, without hanging if a live child closes stdout.
+            _ = exited.wait(timeout: .now() + 0.2)
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == current else { return }
+                let error: CodexRuntimeError = process.isRunning ? .disconnected
+                    : .processExited(status: process.terminationStatus, signaled: process.terminationReason == .uncaughtSignal)
+                self.stop(error: error)
             }
         }
-        reader = Task { [weak self] in
-            for await data in chunks { self?.receive(data, generation: current) }
-            self?.ended(current)
-        }
     }
-    private func ended(_ current: UUID) { if generation == current { stop() } }
     private func write(_ value: CodexValue) throws {
         guard let input, child?.isRunning == true else { throw CodexRuntimeError.disconnected }
         var data = try JSONEncoder().encode(value); data.append(10)
@@ -205,11 +209,11 @@ final class CodexProcess {
         guard current == generation else { return }
         buffer.append(data)
         // Prevent a broken or hostile child from allocating unbounded protocol buffers.
-        guard buffer.count <= 16 * 1024 * 1024 else { stop(); return }
+        guard buffer.count <= 16 * 1024 * 1024 else { stop(error: .requestFailed("protocol frame size limit")); return }
         while let end = buffer.firstIndex(of: 10) {
             let line = buffer[..<end]; buffer.removeSubrange(...end)
             guard !line.isEmpty else { continue }
-            guard let message = try? JSONDecoder().decode(CodexValue.self, from: line) else { stop(); return }
+            guard let message = try? JSONDecoder().decode(CodexValue.self, from: line) else { stop(error: .invalidProtocol); return }
             let id = message["id"]
             if let method = message["method"].text {
                 onMessage?(method, message["params"], id == .null ? nil : id)

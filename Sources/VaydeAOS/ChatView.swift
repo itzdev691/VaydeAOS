@@ -122,7 +122,7 @@ struct ChatView: View {
         .onReceive(NotificationCenter.default.publisher(for: .vaydeOpenChat)) { _ in openChat() }
         .onAppear {
             telemetry.start()
-            if session.errorMessage != nil { openChat() }
+            if session.errorMessage != nil || !session.draft.isEmpty { openChat() }
         }
         .onDisappear { telemetry.stop() }
         .onChange(of: scenePhase) { phase in
@@ -266,7 +266,7 @@ struct ChatView: View {
                 .font(Console.mono(10)).padding(.horizontal, 16).frame(height: 38)
                 .background(Console.background.opacity(0.45))
                 Group {
-                    if session.messages.isEmpty && session.pendingMessage == nil {
+                    if session.messages.isEmpty && session.pendingMessage == nil && session.interruptedTurns.isEmpty {
                         ScrollView { emptyConversation }
                     } else { transcript }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -300,7 +300,15 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 18) {
-                    ForEach(session.messages) { MessageRow(message: $0) }
+                    ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, message in
+                        ForEach(session.interruptedTurns.filter { $0.afterMessageCount == index }) { interrupted in
+                            InterruptedTurnRow(turn: interrupted)
+                        }
+                        MessageRow(message: message)
+                    }
+                    ForEach(session.interruptedTurns.filter { $0.afterMessageCount >= session.messages.count }) { interrupted in
+                        InterruptedTurnRow(turn: interrupted)
+                    }
                     if let message = session.pendingMessage { MessageRow(message: message) }
                     if session.isSending {
                         if !session.partialReply.isEmpty {
@@ -323,6 +331,7 @@ struct ChatView: View {
             .onChange(of: session.messages.count) { _ in scrollToBottom(proxy) }
             .onChange(of: session.pendingMessage?.id) { _ in scrollToBottom(proxy) }
             .onChange(of: session.partialReply) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.interruptedTurns.count) { _ in scrollToBottom(proxy) }
             .onChange(of: session.codex.prompts.count) { _ in scrollToBottom(proxy) }
             .onChange(of: session.codex.activity.count) { _ in scrollToBottom(proxy) }
         }
@@ -390,6 +399,22 @@ struct ChatView: View {
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
         if reduceMotion { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
         else { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("conversation-bottom", anchor: .bottom) } }
+    }
+}
+
+private struct InterruptedTurnRow: View {
+    let turn: InterruptedTurn
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            MessageRow(message: turn.message)
+            Text(turn.wasCancelled ? "STOPPED / INCOMPLETE" : "INTERRUPTED / INCOMPLETE")
+                .font(Console.mono(10)).foregroundStyle(Console.amber)
+            if let response = turn.response { MessageRow(message: response) }
+            else { Text("No response text was received.").font(Console.mono(11)).foregroundStyle(Console.muted) }
+        }
+        .padding(10)
+        .overlay(Rectangle().stroke(Console.amber.opacity(0.35)))
+        .accessibilityElement(children: .contain).accessibilityLabel("Interrupted conversation attempt")
     }
 }
 

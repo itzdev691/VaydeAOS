@@ -1,6 +1,6 @@
 import Foundation
 
-/// Stores app preferences and completed chat turns. Credentials belong in Keychain.
+/// Stores app preferences, completed turns, and separate interrupted attempts. Credentials belong in Keychain.
 public struct LocalStore: Sendable {
     public let directory: URL
 

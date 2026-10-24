@@ -16,3 +16,13 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         self.content = content
     }
 }
+
+/// A visible, recoverable attempt, kept separate from confirmed model history.
+public struct InterruptedTurn: Identifiable, Codable, Equatable, Sendable {
+    public var id: UUID { message.id }
+    public let message: ChatMessage
+    public let originalDraft: String
+    public let response: ChatMessage?
+    public let afterMessageCount: Int
+    public let wasCancelled: Bool
+}

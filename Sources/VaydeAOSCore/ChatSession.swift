@@ -9,6 +9,7 @@ public final class ChatSession: ObservableObject {
     @Published public private(set) var isSending = false
     @Published public private(set) var pendingMessage: ChatMessage?
     @Published public private(set) var partialReply = ""
+    @Published public private(set) var interruptedTurns: [InterruptedTurn] = []
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var notice: String?
     @Published public private(set) var performanceHistory: [RequestPerformance] = []
@@ -26,6 +27,7 @@ public final class ChatSession: ObservableObject {
     private var activeRequest: ActiveRequest?
     private var settingsLoadIssue: String?
     private var messagesLoadIssue: String?
+    private var recoveryLoadIssue: String?
     // Never serialized. An empty value explicitly overrides a saved key.
     private var sessionAPIKeys: [String: String] = [:]
 
@@ -58,6 +60,15 @@ public final class ChatSession: ObservableObject {
             messages = try store.loadMessages()
         } catch {
             messagesLoadIssue = "Could not load the saved conversation: \(error.localizedDescription) Start a New Chat to replace the existing file."
+        }
+        do {
+            interruptedTurns = try store.load([InterruptedTurn].self, from: "interrupted-turns.json") ?? []
+            if let last = interruptedTurns.last, last.afterMessageCount >= messages.count {
+                draft = last.originalDraft
+                notice = "Interrupted conversation restored. Saved partial responses are incomplete; completed tool actions may remain."
+            }
+        } catch {
+            recoveryLoadIssue = "Could not load interrupted responses: \(error.localizedDescription) Start a New Chat to replace the existing file."
         }
         errorMessage = loadIssues
         if settings.needsChatGPTAccountReview {
@@ -141,10 +152,11 @@ public final class ChatSession: ObservableObject {
         guard let request = activeRequest else { return }
         sendTask?.cancel()
         if settings.provider == .chatGPT { codex.cancel() }
+        let recoveryError = preserveInterruptedTurn(request, wasCancelled: true)
         recordPerformance(outcome: .cancelled)
         clearActiveRequest()
         draft = request.originalDraft
-        errorMessage = nil
+        errorMessage = recoveryError
         notice = cancellationNotice
     }
 
@@ -155,11 +167,14 @@ public final class ChatSession: ObservableObject {
         clearActiveRequest()
         draft = ""
         messages = []
+        interruptedTurns = []
         messagesLoadIssue = nil
+        recoveryLoadIssue = nil
         errorMessage = settingsLoadIssue
         notice = nil
         do {
             try store.saveMessages(messages)
+            try store.save(interruptedTurns, to: "interrupted-turns.json")
         } catch {
             errorMessage = "Could not clear the saved conversation: \(error.localizedDescription)"
         }
@@ -238,7 +253,7 @@ public final class ChatSession: ObservableObject {
     }
 
     private var loadIssues: String? {
-        let issues = [settingsLoadIssue, messagesLoadIssue].compactMap { $0 }
+        let issues = [settingsLoadIssue, messagesLoadIssue, recoveryLoadIssue].compactMap { $0 }
         return issues.isEmpty ? nil : issues.joined(separator: "\n\n")
     }
 
@@ -257,18 +272,21 @@ public final class ChatSession: ObservableObject {
 
     private func finishFailure(_ id: UUID, description: String) {
         guard let request = activeRequest, request.id == id else { return }
+        let recoveryError = preserveInterruptedTurn(request, wasCancelled: false)
         recordPerformance(outcome: .failed)
         clearActiveRequest()
         draft = request.originalDraft
-        errorMessage = "Could not send message: \(description)"
+        let prefix = settings.provider == .chatGPT ? "Response interrupted" : "Could not send message"
+        errorMessage = ["\(prefix): \(description)", recoveryError].compactMap { $0 }.joined(separator: "\n")
     }
 
     private func finishCancellation(_ id: UUID) {
         guard let request = activeRequest, request.id == id else { return }
+        let recoveryError = preserveInterruptedTurn(request, wasCancelled: true)
         recordPerformance(outcome: .cancelled)
         clearActiveRequest()
         draft = request.originalDraft
-        errorMessage = nil
+        errorMessage = recoveryError
         notice = cancellationNotice
     }
 
@@ -276,6 +294,15 @@ public final class ChatSession: ObservableObject {
         settings.provider == .chatGPT
             ? "Codex stopped. Completed tool actions were not undone. Inspect activity before resending."
             : "Generation stopped. Your message is ready to send again."
+    }
+
+    private func preserveInterruptedTurn(_ request: ActiveRequest, wasCancelled: Bool) -> String? {
+        guard settings.provider == .chatGPT, performanceRequestStartedAt != nil else { return nil }
+        let response = partialReply.isEmpty ? nil : ChatMessage(role: .assistant, content: partialReply)
+        interruptedTurns.append(InterruptedTurn(message: request.message, originalDraft: request.originalDraft,
+            response: response, afterMessageCount: messages.count, wasCancelled: wasCancelled))
+        do { try store.save(interruptedTurns, to: "interrupted-turns.json"); return nil }
+        catch { return "The interrupted response is visible, but could not be saved: \(error.localizedDescription)" }
     }
 
     private func recordPerformance(outcome: RequestPerformance.Outcome, reply: ChatReply? = nil) {

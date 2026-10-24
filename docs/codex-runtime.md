@@ -85,7 +85,19 @@ thread history under its configured home, subject to its own storage policies.
 
 Only a `turn/completed` event with status `completed` commits an assistant reply.
 Failures, malformed output, disconnection, timeout, and cancellation preserve the
-prompt and the last committed conversation. An interrupted marker is written
+prompt and the last committed conversation. Interrupted attempts and any received
+assistant text remain visible, explicitly marked incomplete, and are saved with
+0600 permissions in `interrupted-turns.json`. They survive relaunch and remain in
+their original position when subsequent turns complete. They are not submitted as
+completed model history, and recovery never starts a model request or repeats a
+tool action automatically. **New Chat** clears this local recovery history too.
+
+The stdout reader applies pipe backpressure when the UI is busy instead of dropping
+queued chunks and disconnecting. It drains stdout before handling process exit,
+so a final completion event cannot be overtaken by the termination callback.
+Protocol failures and process exit codes are reported distinctly.
+
+An interrupted marker is written
 before the turn starts so an app crash cannot silently report success. **New Chat**
 clears the app's thread link and activity, without deleting Codex's independent
 runtime records or undoing tool actions.
@@ -105,6 +117,9 @@ frames, multiple assistant phases, tool approvals, structured input, stale and
 unknown requests, failures, crashes, malformed JSON, cancellation before turn
 acknowledgment, restart/resume without replay, corrupt storage, and workspace
 changes. Existing chat/provider tests remain separate.
+Regression fixtures also cover a slow stdout consumer during a large burst,
+completion immediately followed by process exit, and interrupted text/history
+surviving relaunch and an explicit follow-up without replaying previous actions.
 
 An opt-in real-runtime check is available:
 
@@ -134,6 +149,13 @@ conversation, preservation of legacy credential files, private read-only workspa
 selection, API-key isolation, and a live tool-backed marker-file read. The app built
 and passed strict signature verification; the retired Node helper was absent from
 the package. Native inspection of the merged panel was blocked by the locked Mac.
+
+The October 24 disconnection fix passed 82 Swift tests in seven suites, including
+the burst/exit and interrupted-history regressions. A separate live bundled-runtime
+check discovered seven models and 19 integrations, executed a temporary-file read,
+and verified the completed reply. The rebuilt app passed strict signature verification.
+Native inspection confirmed that a recovered completed reply and an earlier
+incomplete attempt were both visible in the conversation.
 
 ## Design context
 
