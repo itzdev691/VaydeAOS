@@ -1,0 +1,13 @@
+{
+  "version": "0.164.0",
+  "platforms": {
+    "arm64": {
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.164.0-darwin-arm64.tgz",
+      "integrity": "sha512-pDizgOUAtq3/k3AbUFHbaU19WpYKCja+oFpNSTLKrDQj4lTUNSDuTPJip4uQVn2/1EipQdpQrGMOQBVuI1znAA=="
+    },
+    "x64": {
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.164.0-darwin-x64.tgz",
+      "integrity": "sha512-lIe+udnguPGzBezkgbkj2Eaz0YqOhNXT7jja136Fj0sXfI+UKNS2icmaK14GcoRAgeVEpDTtC1ftamWBPmD1zg=="
+    }
+  }
+}

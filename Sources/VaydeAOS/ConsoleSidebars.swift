@@ -87,6 +87,7 @@ struct SessionSidebar: View {
     @ObservedObject var telemetry: SystemTelemetry
     @Binding var showingConnectionSettings: Bool
     @State private var showAllInterfaces = false
+    @State private var reasoningError: String?
 
     private var interfaces: [SystemTelemetry.NetworkInterface] {
         let active = telemetry.interfaces.filter { $0.isUp && !$0.addresses.isEmpty }.sorted {
@@ -106,15 +107,17 @@ struct SessionSidebar: View {
                         HStack(spacing: 10) {
                             Image(systemName: "cpu").font(.system(size: 25, weight: .ultraLight)).foregroundStyle(Console.blue)
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(session.settings.model).font(Console.mono(13, weight: .medium)).lineLimit(2)
-                                Text("CHAT COMPLETIONS").font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
+                                Text(session.modelSelection.displayName).font(Console.mono(13, weight: .medium)).lineLimit(2)
+                                Text(session.settings.provider == .chatGPT ? "CHATGPT / AGENT RUNTIME" : "CHAT COMPLETIONS")
+                                    .font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
                             }
                         }
-                        Text(session.settings.baseURL).font(Console.mono(10)).foregroundStyle(Console.blue)
+                        Text(session.settings.connectionLabel).font(Console.mono(10)).foregroundStyle(Console.blue)
                             .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                         Rectangle().fill(Console.line).frame(height: 1)
                         InstrumentRow(label: "REQUEST", value: session.isSending ? "RUNNING" : session.errorMessage != nil ? "ATTENTION" : "STANDBY", color: session.errorMessage != nil ? Console.amber : Console.green)
                         InstrumentRow(label: "CONTEXT", value: "\(session.messages.count) messages")
+                        reasoningControl
                         Button { showingConnectionSettings = true } label: {
                             HStack { Text("CONFIGURE UPLINK"); Spacer(); Image(systemName: "arrow.up.right") }
                         }.buttonStyle(ConsoleButtonStyle()).disabled(session.isSending)
@@ -150,26 +153,44 @@ struct SessionSidebar: View {
                         }.buttonStyle(.plain)
                     }
                 }
-                ConsolePanel(title: "SESSION STATE", index: "LOG") {
-                    VStack(alignment: .leading, spacing: 15) {
-                        event("01", "Workspace loaded", detail: "Native macOS session", color: Console.green)
-                        event("02", "Model configured", detail: session.settings.model, color: Console.blue)
-                        event("03", session.isSending ? "Request running" : session.errorMessage != nil ? "Action required" : "Awaiting input",
-                              detail: session.isSending ? "Stop available in command channel" : session.errorMessage != nil ? "Review the command channel" : "Command-Return to transmit",
-                              color: session.isSending || session.errorMessage != nil ? Console.amber : Console.muted)
-                    }.padding(14)
+                ConsolePanel(title: "PHASE CORE", index: "FX", status: "AMBIENT") {
+                    AmbientGraphic(style: .core).frame(height: 176)
                 }
             }
         }
     }
 
-    private func event(_ number: String, _ title: String, detail: String, color: Color) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(number).font(Console.mono(9)).foregroundStyle(color).padding(.top, 2)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(Console.mono(10)).foregroundStyle(Console.text)
-                Text(detail).font(Console.mono(9)).foregroundStyle(Console.muted).fixedSize(horizontal: false, vertical: true)
-            }
+    private var reasoningControl: some View {
+        let efforts = session.modelSelection.availableEfforts
+        return VStack(alignment: .leading, spacing: 6) {
+            InstrumentRow(label: "REASONING MODE", value: session.settings.reasoningEffort.label.uppercased(), color: Console.blue)
+            Slider(value: Binding(
+                get: { Double(efforts.firstIndex(of: session.settings.reasoningEffort) ?? 0) },
+                set: { value in
+                    do {
+                        let index = min(max(Int(value.rounded()), 0), efforts.count - 1)
+                        try session.setReasoningEffort(efforts[index])
+                        reasoningError = nil
+                    } catch {
+                        reasoningError = "Could not save reasoning mode. \(error.localizedDescription)"
+                    }
+                }
+            ), in: 0...Double(max(efforts.count - 1, 1)), step: 1)
+            .controlSize(.small)
+            .tint(Console.blue)
+            .accessibilityLabel("Reasoning mode")
+            .accessibilityValue(session.settings.reasoningEffort.label)
+            .disabled(session.isSending || session.codex.isChecking || session.codex.isRunning || efforts.count <= 1)
+            HStack {
+                Text("AUTO")
+                Spacer()
+                Text(efforts.last?.label.uppercased() ?? "AUTO")
+            }.font(Console.mono(8)).foregroundStyle(Console.muted)
+            Text(reasoningError ?? session.modelSelection.issue ?? session.modelSelection.hint)
+                .font(Console.mono(8)).foregroundStyle(reasoningError == nil ? Console.muted : Console.amber)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .onChange(of: session.selectedChatID) { _ in reasoningError = nil }
     }
+
 }

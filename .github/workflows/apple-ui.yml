@@ -1,0 +1,129 @@
+name: Apple UI CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'codex/**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-ui-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  macos:
+    name: ${{ matrix.check_name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      # Pin the SDK and compiler for every build/test/packaging command.
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+            check_name: Apple UI (arm64)
+          - runner: macos-26-intel
+            arch: x86_64
+            check_name: Apple Build (x86_64)
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check diff whitespace
+        env:
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -n "$DIFF_BASE" && "$DIFF_BASE" != 0000000000000000000000000000000000000000 ]]; then
+            git diff --check "$DIFF_BASE" HEAD
+          else
+            git diff --check HEAD
+          fi
+
+      - name: Verify pinned Apple toolchain
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          swift_version="$(xcrun swift --version)"
+          printf '%s\n' "$swift_version"
+          if [[ "$swift_version" != *"Apple Swift version 6.3.2 "* ]]; then
+            echo '::error::Expected Apple Swift 6.3.2 from Xcode 26.5.'
+            exit 1
+          fi
+          test "$(uname -m)" = "${{ matrix.arch }}"
+
+      - name: Run Swift tests
+        timeout-minutes: 5
+        env:
+          # A single cooperative worker catches blocking async I/O even on
+          # developer machines with more cores than the hosted runners.
+          LIBDISPATCH_COOPERATIVE_POOL_STRICT: '1'
+        run: |
+          mkdir -p build/ci-logs
+          ./test.sh 2>&1 | tee build/ci-logs/tests.log
+
+      - name: Build release app
+        run: ./build.sh release 2>&1 | tee build/ci-logs/build.log
+
+      - name: Verify app bundle and signature
+        run: |
+          plutil -lint build/VaydeAOS.app/Contents/Info.plist
+          test -x build/VaydeAOS.app/Contents/MacOS/VaydeAOS
+          test -d build/VaydeAOS.app/Contents/Resources/VaydeAOS_VaydeAOS.bundle
+          test -x build/VaydeAOS.app/Contents/Resources/Codex/bin/codex
+          test -x build/VaydeAOS.app/Contents/Resources/Codex/bin/codex-code-mode-host
+          test -x build/VaydeAOS.app/Contents/Resources/Codex/codex-path/rg
+          test -f build/VaydeAOS.app/Contents/Resources/Codex/LICENSE
+          test -f build/VaydeAOS.app/Contents/Resources/Codex/NOTICE
+          build/VaydeAOS.app/Contents/Resources/Codex/bin/codex --version
+          codesign --verify --deep --strict --verbose=2 build/VaydeAOS.app
+
+      - name: Smoke test native window startup
+        if: matrix.arch == 'arm64'
+        run: swift scripts/ci-ui-smoke.swift build/VaydeAOS.app build/ci-logs/ui.log
+
+      - name: Record Intel UI coverage limit
+        if: matrix.arch == 'x86_64'
+        run: |
+          echo '::warning::Intel UI startup is unverified: the hosted runner aborted inside Metal. This job validates tests, build, signature, and packaging only.'
+          echo 'Intel UI startup is unverified. The hosted macOS 15 Intel runner aborted inside Metal with "Target device architecture is nil". UI smoke testing runs on Apple Silicon; this job validates tests, build, signature, and packaging.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Archive app for download
+        run: |
+          archive="build/VaydeAOS-macos-${{ matrix.arch }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/VaydeAOS.app "$archive"
+          (cd build && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
+
+      - name: Upload app package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: VaydeAOS-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            build/VaydeAOS-macos-${{ matrix.arch }}.zip
+            build/VaydeAOS-macos-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: Apple-UI-logs-${{ matrix.arch }}-${{ github.sha }}
+          path: build/ci-logs/
+          if-no-files-found: ignore
+          retention-days: 7

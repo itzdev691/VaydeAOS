@@ -13,6 +13,7 @@ struct ChatView: View {
     @FocusState private var composerFocused: Bool
     @State private var workspaceMode = WorkspaceMode.workspace
     @State private var chatPresented = false
+    @AppStorage("chat.sidebarVisible") private var chatSidebarVisible = true
     @State private var lastInteraction = Date()
     @State private var events = [WorkspaceEvent(title: "Workspace initialized")]
     @AppStorage("workspace.autoIdle") private var autoIdle = true
@@ -28,7 +29,11 @@ struct ChatView: View {
                 header.workspaceBoot(stage: 0, label: "DISPLAY")
                 navigation.workspaceBoot(stage: 1, label: "NAVIGATION")
                 HStack(alignment: .top, spacing: 12) {
-                    if workspaceMode != .focus {
+                    if chatPresented && chatSidebarVisible {
+                        ChatSidebar(session: session, openChat: { openChat() })
+                            .frame(width: geometry.size.width < 1250 ? 208 : 238)
+                            .workspaceBoot(stage: 2, label: "CHAT HISTORY")
+                    } else if !chatPresented && workspaceMode != .focus {
                         TelemetrySidebar(telemetry: telemetry)
                             .workspaceBoot(stage: 2, label: "HOST INSTRUMENTS")
                             .frame(width: geometry.size.width < 1250 ? 208 : 238)
@@ -39,7 +44,7 @@ struct ChatView: View {
                             VStack(spacing: 12) {
                                 idleBanner.workspaceBoot(stage: 3, label: "WORKSPACE")
                                 activityGraphPanel.frame(height: workspaceMode == .network ? 300 : 230)
-                                WorkspaceWidgets(telemetry: telemetry, events: events,
+                                WorkspaceWidgets(isActive: !chatPresented, events: events,
                                                  interrupt: { openChat(prompt: $0) }, record: record)
                             }
                         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -50,6 +55,10 @@ struct ChatView: View {
                             VStack(spacing: 12) {
                                 HStack {
                                     Circle().fill(Console.green).frame(width: 5, height: 5)
+                                    Button { chatSidebarVisible.toggle() } label: {
+                                        Image(systemName: "sidebar.left")
+                                    }.buttonStyle(.plain).accessibilityLabel("Toggle chat sidebar")
+                                        .help("Show or hide chats")
                                     Text("CHANNEL OPEN").tracking(1.2)
                                     Spacer()
                                     Button { enterIdle() } label: {
@@ -81,6 +90,7 @@ struct ChatView: View {
             }
         }
         .environment(\.workspaceBootStep, reduceMotion ? 11 : bootStep)
+        .task(id: session.modelCatalogIdentity) { await session.refreshModels() }
         .task(id: bootReady) {
             guard bootReady else { return }
             if reduceMotion { bootStep = 11; return }
@@ -122,12 +132,13 @@ struct ChatView: View {
         .onReceive(NotificationCenter.default.publisher(for: .vaydeOpenChat)) { _ in openChat() }
         .onAppear {
             telemetry.start()
-            if session.errorMessage != nil { openChat() }
+            if session.errorMessage != nil || !session.draft.isEmpty { openChat() }
         }
         .onDisappear { telemetry.stop() }
         .onChange(of: scenePhase) { phase in
             if phase == .background { telemetry.stop() } else { telemetry.start() }
         }
+        .onChange(of: session.selectedChatID) { _ in openChat() }
         .onChange(of: session.isSending) { sending in
             lastInteraction = Date()
             record(sending ? "Model request started" : "Model request finished")
@@ -240,8 +251,8 @@ struct ChatView: View {
     }
 
     private var activityGraphPanel: some View {
-        ConsolePanel(title: "MODEL PERFORMANCE", index: "01", status: "LAST 60 REQUESTS") {
-            CircularActivityView(session: session, isActive: scenePhase != .background && !chatPresented)
+        ConsolePanel(title: "OPENAI API STATUS", index: "01", status: "PUBLIC FEED / 60 SEC") {
+            CircularActivityView(isActive: scenePhase == .active && !chatPresented)
                 .background(ConsoleGrid())
         }
     }
@@ -251,18 +262,22 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Image(systemName: "terminal").foregroundStyle(Console.blue)
-                    Text(session.settings.model).foregroundStyle(Console.text).lineLimit(1)
+                    Text(session.modelSelection.displayName).foregroundStyle(Console.text).lineLimit(1)
+                    if session.settings.provider == .chatGPT {
+                        Link(session.codex.isSignedIn ? "Using ChatGPT plan" : "ChatGPT connection required",
+                             destination: ChatGPTAccount.usageURL).foregroundStyle(Console.blue)
+                    }
                     Text("/ \(session.messages.count) messages").foregroundStyle(Console.muted)
                     Spacer()
                     Button { session.newChat(); composerFocused = true } label: {
                         Label("NEW CHAT", systemImage: "plus")
                     }
-                    .buttonStyle(.plain).foregroundStyle(Console.blue).help("New chat (Command-N)").accessibilityLabel("New chat")
+                    .buttonStyle(.plain).foregroundStyle(Console.blue).disabled(!session.canOrganizeChats).help("New chat (Command-N)").accessibilityLabel("New chat")
                 }
                 .font(Console.mono(10)).padding(.horizontal, 16).frame(height: 38)
                 .background(Console.background.opacity(0.45))
                 Group {
-                    if session.messages.isEmpty && session.pendingMessage == nil {
+                    if session.messages.isEmpty && session.pendingMessage == nil && session.interruptedTurns.isEmpty {
                         ScrollView { emptyConversation }
                     } else { transcript }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -296,27 +311,51 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 18) {
-                    ForEach(session.messages) { MessageRow(message: $0) }
+                    ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, message in
+                        ForEach(session.interruptedTurns.filter { $0.afterMessageCount == index }) { interrupted in
+                            InterruptedTurnRow(turn: interrupted)
+                        }
+                        MessageRow(message: message)
+                    }
+                    ForEach(session.interruptedTurns.filter { $0.afterMessageCount >= session.messages.count }) { interrupted in
+                        InterruptedTurnRow(turn: interrupted)
+                    }
                     if let message = session.pendingMessage { MessageRow(message: message) }
                     if session.isSending {
+                        if !session.partialReply.isEmpty {
+                            MessageRow(message: ChatMessage(role: .assistant, content: session.partialReply))
+                        }
+                        if session.settings.provider == .chatGPT { CodexTaskView(runtime: session.codex) }
                         HStack(spacing: 10) {
                             ProgressView().controlSize(.small)
-                            Text("Awaiting model response…").font(Console.mono(11)).foregroundStyle(Console.blue)
+                            Text(session.settings.provider == .chatGPT && !session.codex.prompts.isEmpty
+                                 ? "Waiting for your input…"
+                                 : session.partialReply.isEmpty ? "Awaiting model response…" : "Receiving response…").font(Console.mono(11)).foregroundStyle(Console.blue)
                             Spacer()
                         }
-                    }
+                    } else if session.settings.provider == .chatGPT { CodexTaskView(runtime: session.codex) }
                     Color.clear.frame(height: 1).id("conversation-bottom").accessibilityHidden(true)
                 }.padding(18)
             }
             .accessibilityLabel("Conversation")
             .onAppear { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+            .onChange(of: session.selectedChatID) { _ in scrollToBottom(proxy) }
             .onChange(of: session.messages.count) { _ in scrollToBottom(proxy) }
             .onChange(of: session.pendingMessage?.id) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.partialReply) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.interruptedTurns.count) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.codex.prompts.count) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.codex.activity.count) { _ in scrollToBottom(proxy) }
         }
     }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 9) {
+            ChatModelControls(session: session) { showingConnectionSettings = true }
+            if let transition = session.contextTransitionNotice {
+                Text(transition).font(Console.mono(10)).foregroundStyle(Console.amber)
+                    .fixedSize(horizontal: false, vertical: true).accessibilityLabel("Runtime context change: " + transition)
+            }
             if let notice = session.notice {
                 Text(notice).font(Console.mono(10)).foregroundStyle(Console.muted).textSelection(.enabled)
             }
@@ -342,7 +381,7 @@ struct ChatView: View {
                 }
             }
             HStack {
-                Text("TEXT CHANNEL").tracking(1).foregroundStyle(Console.muted)
+                ChatWorkspacePicker(session: session)
                 Spacer()
                 Text("⌘ ↵").foregroundStyle(Console.muted).padding(.trailing, 4)
                 if session.isSending {
@@ -380,27 +419,18 @@ struct ChatView: View {
     }
 }
 
-private struct MessageRow: View {
-    let message: ChatMessage
-    @State private var copied = false
-    private var isUser: Bool { message.role == .user }
+private struct InterruptedTurnRow: View {
+    let turn: InterruptedTurn
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text(isUser ? "YOU" : "AGENT").tracking(1.5).foregroundStyle(isUser ? Console.muted : Console.blue)
-                Rectangle().fill(Console.line).frame(height: 1)
-                Button {
-                    NSPasteboard.general.clearContents()
-                    copied = NSPasteboard.general.setString(message.content, forType: .string)
-                } label: {
-                    Label(copied ? "COPIED" : "COPY", systemImage: copied ? "checkmark" : "doc.on.doc")
-                }.buttonStyle(.plain).foregroundStyle(Console.muted).help("Copy message")
-            }.font(Console.mono(9, weight: .medium))
-            Text(message.content).font(.system(size: 13)).lineSpacing(5).textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 12) {
+            MessageRow(message: turn.message)
+            Text(turn.wasCancelled ? "STOPPED / INCOMPLETE" : "INTERRUPTED / INCOMPLETE")
+                .font(Console.mono(10)).foregroundStyle(Console.amber)
+            if let response = turn.response { MessageRow(message: response) }
+            else { Text("No response text was received.").font(Console.mono(11)).foregroundStyle(Console.muted) }
         }
-        .padding(.leading, 12).padding(.vertical, 5)
-        .overlay(alignment: .leading) { Rectangle().fill(isUser ? Console.line : Console.blue.opacity(0.5)).frame(width: 2) }
-        .accessibilityElement(children: .contain).accessibilityLabel(isUser ? "Your message" : "Assistant message")
+        .padding(10)
+        .overlay(Rectangle().stroke(Console.amber.opacity(0.35)))
+        .accessibilityElement(children: .contain).accessibilityLabel("Interrupted conversation attempt")
     }
 }

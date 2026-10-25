@@ -1,0 +1,2 @@
+# Preserve verbatim upstream legal notices, including their original whitespace.
+Helpers/ChatGPT/vendor/siwc-local/UPSTREAM_THIRD_PARTY_NOTICES.md -whitespace

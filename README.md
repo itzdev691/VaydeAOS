@@ -3,12 +3,16 @@
 A native macOS command center written in Swift and SwiftUI, with a VaydeNet navy, blue, and red
 console, live system instruments, and an integrated model chat channel. Connection settings support
 local Ollama and servers that implement the OpenAI-compatible Chat Completions
-API.
+API. One **ChatGPT** connection supports conversation and agent tools through the
+bundled Codex runtime, with browser sign-in and eligible ChatGPT plan usage.
 
 ## Build and run
 
 Requires macOS 13 or later and Swift 6 or later from Xcode Command Line Tools
 (`xcode-select --install`). No external Swift packages are required.
+The build uses Python 3.9+ to download a checksum-pinned official Codex runtime
+from npm. Internet access is required for the first build. The runtime is bundled;
+users need no separate Codex or Node installation.
 
 From the repository root:
 
@@ -21,9 +25,68 @@ Use `./build.sh release` for an optimized build. The script packages the SwiftPM
 executable into a macOS `.app` and signs it locally. Distribution signing and
 notarization are separate from this local development build.
 
+## Apple UI CI/CD
+
+[Apple UI CI/CD](.github/workflows/apple-ui.yml) runs on pull requests targeting
+`main`, pushes to `main` or `codex/**`, version tags (`v*`), and manual dispatch.
+It uses [GitHub's macOS runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+on Apple Silicon and Intel to run the Swift tests, build the release SwiftUI app,
+and validate bundle resources and its ad-hoc signature. Both jobs use macOS 26
+with Xcode 26.5 explicitly selected through `DEVELOPER_DIR`. An initial check
+requires Apple Swift 6.3.2 so runner defaults cannot silently change the compiler.
+Native window startup is
+smoke tested on Apple Silicon. The hosted Intel runner aborted inside Metal with
+`Target device architecture is nil` during the [initial runtime check](https://github.com/itzdev691/VaydeAOS/actions/runs/39870566994/job/120143812714),
+so Intel UI runtime remains unverified and its job reports this coverage limit.
+The smoke test requires a logged-in desktop and checks that the app keeps a main
+window for ten seconds across macOS Spaces; interaction tests and visual layout checks remain manual.
+
+Successful runs provide architecture-specific `.app` ZIPs and SHA-256 checksums
+under **Actions → Apple UI CI/CD → Artifacts**, retained for 14 days. Validation
+logs are retained for seven days, including on failure. These are development
+packages signed ad-hoc, without Developer ID signing or Apple notarization.
+The workflow does not publish App Store builds or GitHub Releases and requires
+no Apple signing secrets.
+
+Check names are `Apple UI (arm64)` and `Apple Build (x86_64)`. They can be selected
+as required status checks after the workflow has been pushed and run on GitHub.
+
 ## Connect a model
 
+Open **Connection Settings → ChatGPT**. One account and model selection serve
+conversation and agent tools. **Continue with ChatGPT** connects the account;
+**Manage usage** opens ChatGPT usage settings. An existing ChatGPT account in
+Codex on this Mac is reused. Signing out disconnects that shared account.
+
+The workspace folder is optional. Without one, the runtime uses a private
+chat workspace. Selecting a folder supplies task context. Commands run with full
+filesystem and network access under your macOS account, without runtime approval
+prompts. macOS permissions and connected-service scopes still apply. Chat shows
+tool activity and any service input controls. Stop
+interrupts the runtime; completed actions are not undone.
+
+Older **ChatGPT plan** and **Codex runtime** settings migrate to this one connection,
+preserving the selected model and visible conversation. Former direct-chat settings
+require confirming the displayed account before
+sending. Old helper credential files remain untouched;
+they are not imported into Codex or used as an automatic fallback.
+
+Builds bundle checksum-pinned Codex 0.164.0 for the host architecture. Only completed
+assistant turns are saved. Model access and usage limits remain account-dependent;
+API-key billing stays separate. Runtime integration is experimental, and some
+plugins require capabilities of their original host. See
+[runtime integration](docs/codex-runtime.md) for authentication, permission
+boundaries, history, migration, and validation.
+
 Open the header settings control or **Configure Uplink** to set the API base URL, model name, and optional API key.
+
+The **Reasoning Mode** slider above **Configure Uplink** saves this chat's effort for subsequent requests. It offers Auto plus only the selected model's reported levels, including provider-defined levels. Auto omits the effort parameter. Unsupported saved choices remain visible with an error and block sending until corrected; choosing another model does not silently reset the saved effort.
+
+The composer also has model and reasoning menus, a catalog refresh control, and a connection-settings shortcut. These remain available in Focus mode and narrow windows. The chat header, sidebar, and account-default menu resolve **Account default** to the runtime catalog's actual model name. Until the catalog loads, the default is labeled unresolved.
+
+For Ollama and compatible APIs, **Discover models** in Connection Settings reads the selected endpoint's `GET /models` with its API key. It never sends a prompt or follows redirects. Endpoint edits and unsaved keys use a separate discovery state; saved credentials remain scoped to their endpoint. Refresh in the composer reloads the active connection's catalog. Manual model identifiers remain available if discovery is unsupported or fails. A successfully loaded catalog flags models absent from that list; listing a model does not prove inference entitlement or text-chat support.
+
+Standard API model lists may omit reasoning capabilities. In that case, controls offer Auto and explain that support is unreported; existing explicit levels remain labeled unverified. Compatible servers can advertise `supported_reasoning_efforts` (an array of strings) and `default_reasoning_effort` as optional model-list extensions. No capabilities are inferred from model names. ChatGPT uses the runtime's `supportedReasoningEfforts` and `defaultReasoningEffort` metadata and validates a fresh catalog before starting a thread or inference turn.
 The default is local Ollama at `http://127.0.0.1:11434/v1` with `qwen3.5:9b`.
 Ollama must be running with the selected model installed. Change the model name
 to use a different installed model.
@@ -36,7 +99,25 @@ messages. Replies arrive after the model finishes generating.
 - **Transmit** or **Command-Return** submits a message. Return inserts a new line.
 - **Stop** cancels the app's request and restores the prompt for editing.
   A server may continue generation after the client disconnects.
-- **New Chat** clears the saved conversation and starts with an empty context.
+- **New Chat** or **Command-N** creates a separate saved conversation in the selected workspace.
+- The chat sidebar lists that workspace's conversations, newest activity first, with search.
+  Click a chat to restore its transcript and draft; right-click to rename or delete it.
+  The sidebar button beside **Channel Open** toggles the list.
+- The **Workspace** selector below the message field switches workspaces and provides
+  **New Workspace** and **Rename Workspace**. Each workspace remembers its selected chat
+  and optional task folder. Connection Settings edits the selected workspace's folder;
+  each chat remembers its provider, API endpoint, models, and reasoning effort.
+  Credentials remain shared by account or API endpoint. New chats and workspaces
+  inherit the active chat's connection settings, then keep their own changes.
+- Chat and workspace switching is disabled during generation; stop the response first.
+  Chats keep separate model context, unsent drafts, interrupted attempts, and runtime
+  thread links. The selected workspace and chat return after relaunch.
+- Existing single-chat history imports into **Personal**. Original legacy files remain
+  untouched. The new atomic `chat-library.json` stores chats, drafts, and membership;
+  `codex-<chat UUID>.json` stores each chat's runtime audit and resume link.
+  Version 2 of the library also owns per-chat connection settings. Legacy chats
+  inherit the previous shared settings together before any chat is edited;
+  the original `settings.json` remains untouched as a migration source.
 - Errors preserve the prompt and completed conversation for retrying.
 
 ## Console and instruments
@@ -58,8 +139,13 @@ blue `#60a5fa` / `#1d4ed8`, and red `#ff4c5b`. Green remains a status color.
 The palette is centralized in `ConsoleTheme.swift`, including the circular activity graph and settings.
 
 - **Workspace** starts at idle with live instruments and four additional widgets:
-  a CPU/RX/TX signal inspector, focus timer with 5/15/25/50-minute presets,
+  an ambient signal field, focus timer with 5/15/25/50-minute presets,
   locally saved scratchpad, and a timestamped session activity log.
+- **Signal Field** replaces the duplicate CPU/RX/TX inspector with a flowing wire
+  surface. **Phase Core** replaces the repeated session summary with orbital
+  artwork. Both are labeled **Ambient**, contain no telemetry or simulated
+  measurements, and use native procedural graphics. Animation stops when the
+  app is inactive, when the field is hidden by chat, or with Reduce Motion enabled.
 - **Interrupt**, **Command-K**, or typing outside a text editor opens chat in the
   main center column, with the side instruments accessible. Input monitoring is
   limited to this app's window. Dashboard timers and widget state survive switching.
@@ -76,15 +162,19 @@ The palette is centralized in `ConsoleTheme.swift`, including the circular activ
   interface traffic come from local macOS APIs. Samples refresh once per second.
 - Traffic plots retain up to 60 observed samples and scale independently. They
   measure the selected local interface, not model API traffic or remote nodes.
-- **Model Performance** plots the last 60 requests for the configured endpoint and
-  model: end-to-end latency (blue), API-reported completion tokens per wall second
-  (green), failures (red), and cancellations (amber). Each series uses its own
-  logarithmic scale. Missing token usage stays unavailable. Throughput includes
-  network, queueing, prompt processing, and any non-visible completion tokens;
-  it does not measure generation-only speed or time to first token.
-  Metrics stay in memory and reset when the endpoint or model changes. No
-  background API calls are made. The right-offset circle retains its subtle
-  bounce and border clipping; Reduce Motion disables bounce and interpolation.
+- **OpenAI API Status** polls OpenAI's public
+  [status feed](https://status.openai.com/api/v2/summary.json) every 60 seconds
+  while the dashboard is visible and the app is active. The circular graph keeps
+  the last 60 observations of Chat Completions (inner band) and Responses (outer
+  band). Outward spikes indicate reported degradation or outages; colors identify
+  operational, degraded, outage, and maintenance states. Missing components,
+  unknown states, and failed polls leave gaps. Failed or older-than-150-second
+  observations show an unavailable or stale feed indicator. History is session-only;
+  hidden/background time is not filled with invented samples. No API key, prompts,
+  or configured endpoint/model are sent to the status feed. OpenAI aggregates
+  availability across models and tiers; this graph does not report a selected
+  model's latency, token speed, or benchmark score. The right-offset circle retains
+  its subtle bounce and border clipping; Reduce Motion disables bounce.
 - Narrow windows collapse the right instrument column; side panels scroll.
 - VaydeNet photography and the wolf mark are bundled with the app. The interaction
   hierarchy draws on the VaydeAOS Obsidian planning notes; it does not imply a
@@ -105,13 +195,28 @@ unchanged and are used again after restarting. This option also appears when
 editing an endpoint that already uses a session key. **Save** still attempts to
 store the key in Keychain.
 
-This version provides text chat. File access, Obsidian retrieval, and agent tools
-remain outside the implemented interface.
+The compatible API connection provides text chat. The ChatGPT connection also
+supports file and command tools, configured Obsidian/MCP retrieval, and compatible
+runtime integrations. Available tools depend on local configuration and service
+permissions; discovery alone does not verify successful execution.
+
+Completed assistant messages retain their provider and model. Provider-reported
+models are distinguished from runtime selections and unreported requested models;
+older messages retain their original history without invented attribution. A notice
+before sending explains when settings changes will create a fresh runtime thread.
+The affected answer also records that visible history transferred into a new thread.
+
+The app has a separate 1 MiB UTF-8 submission cap. A transfer exceeding it is rejected
+before creating/resuming a runtime thread or replacing its saved link. This byte
+limit is independent of the selected model's token context window. Context-usage
+display and automatic history summarization remain follow-up work.
 
 ## Verification and source layout
 
 ```sh
 ./test.sh
+git diff --check origin/main...HEAD
+git diff --check
 ```
 
 - `Sources/VaydeAOS/`: SwiftUI console, system telemetry, network visualizations,
@@ -124,6 +229,11 @@ remain outside the implemented interface.
 The tests use Swift Testing and require macOS 14 or later. `test.sh` also locates
 its bundled framework when using Command Line Tools without a full Xcode
 installation.
+
+`.gitattributes` exempts only the verbatim upstream
+`Helpers/ChatGPT/vendor/siwc-local/UPSTREAM_THIRD_PARTY_NOTICES.md` from whitespace
+checks. Its legal text is preserved unchanged; all project-owned changes remain
+checked locally and in Apple CI.
 
 The API adapter follows the documented
 [Chat Completions request format](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)

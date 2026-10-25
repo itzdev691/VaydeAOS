@@ -19,6 +19,10 @@ struct VaydeAOSApp: App {
             .sheet(isPresented: $showingConnectionSettings) {
                 ConnectionSettingsView(session: session)
             }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                session.saveDraft()
+                session.codex.shutdown()
+            }
         }
         .defaultSize(width: 1460, height: 980)
         .windowResizability(.contentMinSize)
@@ -30,7 +34,7 @@ struct VaydeAOSApp: App {
                     NotificationCenter.default.post(name: .vaydeOpenChat, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: .command)
-                .disabled(!startupComplete)
+                .disabled(!startupComplete || !session.canOrganizeChats)
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Connection Settings…") {

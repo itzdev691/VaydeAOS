@@ -7,6 +7,18 @@ struct ConnectionSettingsTests {
         #expect(try ConnectionSettings.local.validated() == .local)
     }
 
+    @Test func testReasoningEffortSurvivesValidationAndPersistence() throws {
+        for effort in ConnectionSettings.ReasoningEffort.allCases {
+            var settings = ConnectionSettings.local
+            settings.reasoningEffort = effort
+            let normalized = try settings.validated()
+            let decoded = try JSONDecoder().decode(ConnectionSettings.self, from: JSONEncoder().encode(normalized))
+            #expect(decoded.reasoningEffort == effort)
+        }
+        let legacy = Data(#"{"baseURL":"http://127.0.0.1:11434/v1","model":"local-model"}"#.utf8)
+        #expect(try JSONDecoder().decode(ConnectionSettings.self, from: legacy).reasoningEffort == .automatic)
+    }
+
     @Test func testNormalizationTrimsURLModelAndTrailingSlashes() throws {
         let settings = try ConnectionSettings(
             baseURL: " HTTPS://API.EXAMPLE.COM:443/v1/// \n",
@@ -60,6 +72,17 @@ struct ConnectionSettingsTests {
         let message = ChatMessage(role: .assistant, content: "A reply\nwith formatting.")
         let data = try JSONEncoder().encode(message)
         #expect(try JSONDecoder().decode(ChatMessage.self, from: data) == message)
+    }
+
+    @Test func legacyMessagesKeepUnknownAttributionAndNewMessagesRoundTripIt() throws {
+        let original = ChatMessage(role: .assistant, content: "Old response")
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        object.removeValue(forKey: "attribution")
+        let legacy = try JSONDecoder().decode(ChatMessage.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(legacy.attribution == nil)
+        let attributed = ChatMessage(role: .assistant, content: "New response",
+            attribution: ResponseAttribution(provider: .chatGPT, model: "resolved-model", source: .reported, startedNewThread: true))
+        #expect(try JSONDecoder().decode(ChatMessage.self, from: JSONEncoder().encode(attributed)) == attributed)
     }
 
     private func assertValidationError(

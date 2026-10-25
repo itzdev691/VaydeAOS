@@ -159,7 +159,7 @@ final class ChatSessionTests {
         let requests = await client.requests
         #expect(requests[1].messages.map(\.content) == ["First question", "First answer", "Follow-up"])
         #expect(requests[1].messages.map(\.role) == [.user, .assistant, .user])
-        #expect(try LocalStore(directory: directory).loadMessages().count == 2)
+        #expect(makeSession(client: client).messages.count == 2)
         await client.succeed(at: 1, with: "Follow-up answer")
         await followUpTask.value
 
@@ -169,7 +169,7 @@ final class ChatSessionTests {
     }
 
     @Test
-    func testNewChatCancelsPendingWorkAndClearsDraftAndSavedTurns() async throws {
+    func testNewChatCancelsPendingWorkAndPreservesPreviousChat() async throws {
         let store = LocalStore(directory: directory)
         try store.saveMessages([ChatMessage(role: .user, content: "Old"), ChatMessage(role: .assistant, content: "Answer")])
         let client = ControlledChatClient()
@@ -179,15 +179,47 @@ final class ChatSessionTests {
         let task = try #require(session.sendTask)
         try await waitForRequests(1, client: client)
 
+        let originalID = session.selectedChatID
         session.newChat()
         #expect(session.draft == "")
         #expect(!(session.isSending))
         #expect(session.messages.isEmpty)
-        #expect(try store.loadMessages() == [])
+        #expect(session.chats.count == 2)
+        #expect(session.chats.first { $0.id == originalID }?.messages.count == 2)
+        #expect(session.chats.first { $0.id == originalID }?.draft == "Pending")
+        #expect(makeSession(client: client).messages.isEmpty)
         await client.succeed(at: 0, with: "Old answer")
         await task.value
         #expect(session.messages.isEmpty)
         #expect(session.draft == "")
+    }
+
+    @Test
+    func testChatAndWorkspaceSelectionCannotRedirectAnActiveReply() async throws {
+        let client = ControlledChatClient()
+        let session = makeSession(client: client)
+        let originalChat = session.selectedChatID
+        let originalWorkspace = session.selectedWorkspaceID
+        session.createWorkspace(named: "Other")
+        let otherWorkspace = session.selectedWorkspaceID
+        let otherChat = session.selectedChatID
+        session.selectWorkspace(originalWorkspace)
+        session.draft = "Keep this response here"
+        session.send()
+        let task = try #require(session.sendTask)
+        try await waitForRequests(1, client: client)
+        session.selectChat(otherChat)
+        session.selectWorkspace(otherWorkspace)
+        session.createWorkspace(named: "Blocked")
+        #expect(session.selectedChatID == originalChat)
+        #expect(session.selectedWorkspaceID == originalWorkspace)
+        #expect(session.workspaces.count == 2)
+        await client.succeed(at: 0, with: "Original response")
+        await task.value
+        session.selectWorkspace(otherWorkspace)
+        #expect(session.messages.isEmpty)
+        session.selectWorkspace(originalWorkspace)
+        #expect(session.messages.map(\.content) == ["Keep this response here", "Original response"])
     }
 
     @Test
@@ -204,10 +236,13 @@ final class ChatSessionTests {
         session.dismissError()
         #expect(session.errorMessage != nil)
         session.send()
+        session.saveDraft()
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("chat-library.json").path))
         #expect(try Data(contentsOf: url) == corrupted)
         session.newChat()
         #expect(session.errorMessage == nil)
-        #expect(try LocalStore(directory: directory).loadMessages() == [])
+        #expect(try Data(contentsOf: url) == corrupted)
+        #expect(makeSession(client: ControlledChatClient()).messages.isEmpty)
         session.draft = "A fresh prompt"
         #expect(session.canSend)
     }
@@ -226,7 +261,8 @@ final class ChatSessionTests {
         #expect(session.errorMessage != nil)
 
         try session.saveSettings(.local, apiKey: "")
-        #expect(try LocalStore(directory: directory).loadSettings() == .local)
+        #expect(try Data(contentsOf: url) == corrupted)
+        #expect(makeSession(client: ControlledChatClient()).settings == .local)
         session.draft = "A prompt"
         #expect(session.canSend)
     }
@@ -243,7 +279,7 @@ final class ChatSessionTests {
         #expect(credentials.savedEndpoint == normalized.baseURL)
         #expect(try session.apiKey(for: settings) == "private-key")
         #expect(credentials.loadedEndpoint == normalized.baseURL)
-        let contents = try String(contentsOf: directory.appendingPathComponent("settings.json"), encoding: .utf8)
+        let contents = try String(contentsOf: directory.appendingPathComponent("chat-library.json"), encoding: .utf8)
         #expect(!(contents.contains("private-key")))
 
         session.draft = "Question"
@@ -323,7 +359,7 @@ final class ChatSessionTests {
         #expect(credentials.loadedEndpoint == nil)
         #expect(credentials.savedEndpoint == nil)
         #expect(session.notice?.contains("until you quit") == true)
-        let saved = try String(contentsOf: directory.appendingPathComponent("settings.json"), encoding: .utf8)
+        let saved = try String(contentsOf: directory.appendingPathComponent("chat-library.json"), encoding: .utf8)
         #expect(!saved.contains("session-secret"))
 
         session.draft = "Question"
@@ -435,13 +471,20 @@ final class ChatSessionTests {
     }
 
     private func waitForRequests(_ count: Int, client: ControlledChatClient) async throws {
-        let deadline = Date().addingTimeInterval(2)
-        while await client.requests.count < count {
-            guard Date() < deadline else {
-                Issue.record("Timed out waiting for request \(count)")
+        // Observe the mock's registration directly instead of racing a two-second
+        // polling deadline against unrelated work on the shared main actor.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            defer { group.cancelAll() }
+            group.addTask { try await client.waitForRequests(count) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 10_000_000_000)
                 throw TestFailure.failed
             }
-            try await Task.sleep(nanoseconds: 1_000_000)
+            do { _ = try await group.next() }
+            catch {
+                if error is TestFailure { Issue.record("Timed out waiting for request \(count)") }
+                throw error
+            }
         }
     }
 }
@@ -455,6 +498,24 @@ private actor ControlledChatClient: ChatServing {
 
     private(set) var requests: [Request] = []
     private var continuations: [Int: CheckedContinuation<String, Error>] = [:]
+    private var requestWaiters: [UUID: (count: Int, continuation: CheckedContinuation<Void, Error>)] = [:]
+
+    func waitForRequests(_ count: Int) async throws {
+        try Task.checkCancellation()
+        guard requests.count < count else { return }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                requestWaiters[id] = (count, continuation)
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        requestWaiters.removeValue(forKey: id)?.continuation.resume(throwing: CancellationError())
+    }
 
     func reply(to messages: [ChatMessage], settings: ConnectionSettings, apiKey: String?) async throws -> String {
         let index = requests.count
@@ -462,6 +523,8 @@ private actor ControlledChatClient: ChatServing {
         // Deliberately ignores task cancellation to exercise stale-response protection.
         return try await withCheckedThrowingContinuation { continuation in
             continuations[index] = continuation
+            let ready = requestWaiters.keys.filter { requestWaiters[$0]!.count <= requests.count }
+            for id in ready { requestWaiters.removeValue(forKey: id)?.continuation.resume() }
         }
     }
 
