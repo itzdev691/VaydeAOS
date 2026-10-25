@@ -13,14 +13,14 @@ struct ChatView: View {
     @FocusState private var composerFocused: Bool
     @State private var workspaceMode = WorkspaceMode.workspace
     @State private var chatPresented = false
-    @AppStorage("chat.sidebarVisible") private var chatSidebarVisible = true
+    @State private var channelWorkspaceID: UUID?
+    private var chatSidebarVisible: Bool { session.workspaceConsole.sidebarVisible }
     @State private var lastInteraction = Date()
-    @State private var events = [WorkspaceEvent(title: "Workspace initialized")]
-    @AppStorage("workspace.autoIdle") private var autoIdle = true
+    private var autoIdle: Bool { session.workspaceConsole.autoIdle }
     private let idleTicker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private enum WorkspaceMode: String, CaseIterable {
-        case workspace = "WORKSPACE", network = "NETWORK", focus = "FOCUS"
+        case workspace = "CONSOLE", network = "NETWORK", focus = "FOCUS"
     }
 
     var body: some View {
@@ -29,23 +29,22 @@ struct ChatView: View {
                 header.workspaceBoot(stage: 0, label: "DISPLAY")
                 navigation.workspaceBoot(stage: 1, label: "NAVIGATION")
                 HStack(alignment: .top, spacing: 12) {
-                    if chatPresented && chatSidebarVisible {
-                        ChatSidebar(session: session, openChat: { openChat() })
+                    if chatSidebarVisible && workspaceMode != .focus {
+                        ChatSidebar(session: session, openChat: { openChat() },
+                                    openConsole: { openConsole() }, isChatOpen: chatPresented)
                             .frame(width: geometry.size.width < 1250 ? 208 : 238)
-                            .workspaceBoot(stage: 2, label: "CHAT HISTORY")
-                    } else if !chatPresented && workspaceMode != .focus {
-                        TelemetrySidebar(telemetry: telemetry)
-                            .workspaceBoot(stage: 2, label: "HOST INSTRUMENTS")
-                            .frame(width: geometry.size.width < 1250 ? 208 : 238)
+                            .workspaceBoot(stage: 2, label: "WORKSPACES")
                     }
                     ZStack {
                         // Keep the dashboard mounted so timers and widget state survive chat.
                         ScrollView(showsIndicators: false) {
                             VStack(spacing: 12) {
-                                idleBanner.workspaceBoot(stage: 3, label: "WORKSPACE")
+                                workspaceBanner.workspaceBoot(stage: 3, label: "WORKSPACE")
+                                workspaceOverview
                                 activityGraphPanel.frame(height: workspaceMode == .network ? 300 : 230)
-                                WorkspaceWidgets(isActive: !chatPresented, events: events,
-                                                 interrupt: { openChat(prompt: $0) }, record: record)
+                                WorkspaceWidgets(session: session, isActive: !chatPresented,
+                                                 interrupt: { openChat(prompt: $0) })
+                                    .id(session.selectedWorkspaceID)
                             }
                         }.frame(maxWidth: .infinity, maxHeight: .infinity)
                         .opacity(chatPresented ? 0 : 1)
@@ -55,15 +54,15 @@ struct ChatView: View {
                             VStack(spacing: 12) {
                                 HStack {
                                     Circle().fill(Console.green).frame(width: 5, height: 5)
-                                    Button { chatSidebarVisible.toggle() } label: {
+                                    Button { session.updateWorkspaceConsole { $0.sidebarVisible.toggle() } } label: {
                                         Image(systemName: "sidebar.left")
                                     }.buttonStyle(.plain).accessibilityLabel("Toggle chat sidebar")
                                         .help("Show or hide chats")
                                     Text("CHANNEL OPEN").tracking(1.2)
                                     Spacer()
-                                    Button { enterIdle() } label: {
-                                        Label("RETURN TO IDLE", systemImage: "square.grid.2x2")
-                                    }.buttonStyle(ConsoleButtonStyle()).help("Show the dashboard; keep the conversation and draft")
+                                    Button { openConsole() } label: {
+                                        Label("WORKSPACE CONSOLE", systemImage: "square.grid.2x2")
+                                    }.buttonStyle(ConsoleButtonStyle()).help("Open this workspace console; keep the conversation and draft")
                                 }.font(Console.mono(9)).foregroundStyle(Console.blue)
                                 conversationPanel
                             }
@@ -120,39 +119,45 @@ struct ChatView: View {
         }
         .onExitCommand {
             if chatPresented {
-                if session.isSending { session.stop() } else { enterIdle() }
+                if session.isSending { session.stop() } else { openConsole() }
             }
         }
         .onReceive(idleTicker) { date in
             if autoIdle, chatPresented, !showingConnectionSettings, !session.isSending,
                session.draft.isEmpty, session.errorMessage == nil, date.timeIntervalSince(lastInteraction) >= 60 {
-                enterIdle()
+                openConsole()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .vaydeOpenChat)) { _ in openChat() }
-        .onAppear {
-            telemetry.start()
-            if session.errorMessage != nil || !session.draft.isEmpty { openChat() }
-        }
+        .onAppear { telemetry.start() }
         .onDisappear { telemetry.stop() }
         .onChange(of: scenePhase) { phase in
             if phase == .background { telemetry.stop() } else { telemetry.start() }
         }
-        .onChange(of: session.selectedChatID) { _ in openChat() }
+        .onChange(of: session.selectedWorkspaceID) { _ in
+            if channelWorkspaceID != session.selectedWorkspaceID {
+                composerFocused = false
+                chatPresented = false
+            }
+            workspaceMode = .workspace
+            lastInteraction = Date()
+        }
         .onChange(of: session.isSending) { sending in
             lastInteraction = Date()
             record(sending ? "Model request started" : "Model request finished")
             if !sending { openChat() }
         }
         .onChange(of: session.errorMessage) { error in
-            if error != nil { record("Model channel needs attention"); openChat() }
+            if error != nil, channelWorkspaceID == session.selectedWorkspaceID {
+                record("Model channel needs attention")
+            }
         }
         .onChange(of: showingConnectionSettings) { showing in
             if !showing && chatPresented { composerFocused = true }
         }
     }
 
-    private var idleBanner: some View {
+    private var workspaceBanner: some View {
         HStack(alignment: .center, spacing: 18) {
             ZStack {
                 Circle().stroke(Console.blue.opacity(0.15), lineWidth: 1).frame(width: 54, height: 54)
@@ -160,19 +165,56 @@ struct ChatView: View {
                 Image(systemName: "waveform.path").font(.system(size: 19, weight: .light)).foregroundStyle(Console.blue)
             }.accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 5) {
-                Text("SYSTEM AT IDLE").font(Console.mono(21, weight: .light)).tracking(2)
-                Text("Instruments live. Interrupt to open your command channel.")
+                Text(session.selectedWorkspace.name.uppercased()).lineLimit(1).truncationMode(.middle).font(Console.mono(21, weight: .light)).tracking(2)
+                Text(session.workspaceDirectory.path).textSelection(.enabled).lineLimit(2)
                     .font(Console.mono(10)).foregroundStyle(Console.muted)
             }
             Spacer(minLength: 0)
-            Toggle("AUTO IDLE", isOn: $autoIdle).toggleStyle(.switch).controlSize(.mini)
+            Toggle("AUTO IDLE", isOn: Binding(get: { autoIdle }, set: { value in
+                session.updateWorkspaceConsole { $0.autoIdle = value }
+            })).toggleStyle(.switch).controlSize(.mini)
                 .font(Console.mono(8)).fixedSize().help("Return to idle after 60 seconds with no input, unsent draft, error, or active request")
         }
         .padding(18).frame(maxWidth: .infinity, alignment: .leading)
         .background(Console.raised.opacity(0.25)).overlay(Rectangle().strokeBorder(Console.line, lineWidth: 1))
     }
 
+    private var workspaceOverview: some View {
+        ConsolePanel(title: "WORKSPACE CHATS", index: "WS", status: "\(session.workspaceChats.count) SAVED") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Button { session.newChat(); openChat() } label: {
+                        Label("NEW CHAT", systemImage: "square.and.pencil")
+                    }.buttonStyle(ConsoleButtonStyle()).disabled(!session.canOrganizeChats)
+                    Button { openChat() } label: {
+                        Label("CONTINUE CHAT", systemImage: "arrow.up.right")
+                    }.buttonStyle(ConsoleButtonStyle())
+                    Spacer()
+                    Text(session.isSending ? "REQUEST RUNNING" : "READY")
+                        .font(Console.mono(9)).foregroundStyle(session.isSending ? Console.amber : Console.muted)
+                }
+                if let error = session.errorMessage {
+                    Text(error).font(Console.mono(10)).foregroundStyle(Console.amber)
+                }
+                ForEach(session.workspaceChats.prefix(3)) { chat in
+                    Button {
+                        session.selectChat(chat.id)
+                        openChat()
+                    } label: {
+                        HStack {
+                            Text(chat.title).lineLimit(1)
+                            Spacer()
+                            Text(chat.draft.isEmpty ? "\(chat.messages.count) messages" : "Draft saved")
+                                .foregroundStyle(Console.muted)
+                        }.font(Console.mono(10)).frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain).disabled(!session.canOrganizeChats)
+                }
+            }.padding(14)
+        }
+    }
+
     private func openChat(prompt: String? = nil) {
+        channelWorkspaceID = session.selectedWorkspaceID
         if let prompt {
             session.draft = session.draft.isEmpty ? prompt : session.draft + "\n\n" + prompt
         }
@@ -182,15 +224,16 @@ struct ChatView: View {
         DispatchQueue.main.async { composerFocused = true }
     }
 
-    private func enterIdle() {
+    private func openConsole() {
+        channelWorkspaceID = nil
         composerFocused = false
+        if workspaceMode == .focus { workspaceMode = .workspace }
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { chatPresented = false }
-        record("Returned to idle")
+        record("Workspace console opened")
     }
 
     private func record(_ title: String) {
-        events.append(WorkspaceEvent(title: title))
-        if events.count > 40 { events.removeFirst(events.count - 40) }
+        session.updateWorkspaceConsole { $0.record(title) }
     }
 
     private var header: some View {
@@ -226,7 +269,10 @@ struct ChatView: View {
     private var navigation: some View {
         HStack(spacing: 0) {
             ForEach(WorkspaceMode.allCases, id: \.self) { mode in
-                Button { workspaceMode = mode; if mode == .focus { openChat() } } label: {
+                Button {
+                    workspaceMode = mode
+                    if mode == .focus { openChat() } else { openConsole() }
+                } label: {
                     HStack(spacing: 8) {
                         Text(mode == .workspace ? "01" : mode == .network ? "02" : "03").foregroundStyle(Console.muted)
                         Text(mode.rawValue).tracking(1.5)
@@ -240,7 +286,15 @@ struct ChatView: View {
                 .buttonStyle(.plain).accessibilityAddTraits(workspaceMode == mode ? .isSelected : [])
             }
             Spacer()
-            Button { openChat() } label: { Text("INTERRUPT  ⌘K").font(Console.mono(10)) }
+            if !chatSidebarVisible || workspaceMode == .focus {
+                Button {
+                    session.updateWorkspaceConsole { $0.sidebarVisible = true }
+                    workspaceMode = .workspace
+                } label: { Image(systemName: "sidebar.left") }
+                    .buttonStyle(ConsoleButtonStyle()).help("Show workspaces")
+            }
+            ChatWorkspacePicker(session: session, openConsole: { openConsole() }).padding(.horizontal, 12)
+            Button { openChat() } label: { Text("OPEN CHAT  ⌘K").font(Console.mono(10)) }
                 .buttonStyle(ConsoleButtonStyle()).padding(.trailing, 18)
             Circle().fill(telemetry.isNetworkAvailable ? Console.green : Console.amber).frame(width: 5, height: 5)
             Text(telemetry.pathStatus.uppercased()).font(Console.mono(9)).tracking(1).padding(.leading, 7).padding(.trailing, 20)

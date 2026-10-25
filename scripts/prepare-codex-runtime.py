@@ -47,7 +47,7 @@ binaries = list(package.glob('vendor/*/bin/codex'))
 if len(binaries) != 1:
     raise SystemExit('Expected exactly one Codex executable')
 binary = binaries[0]
-output = root / 'build/VaydeAOS.app/Contents/Resources/Codex'
+output = pathlib.Path(os.environ.get('VAYDEAOS_APP_DIR', str(root / 'build/VaydeAOS.app'))) / 'Contents/Resources/Codex'
 if output.exists():
     shutil.rmtree(output)
 output.mkdir(parents=True)

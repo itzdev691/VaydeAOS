@@ -25,6 +25,14 @@ Use `./build.sh release` for an optimized build. The script packages the SwiftPM
 executable into a macOS `.app` and signs it locally. Distribution signing and
 notarization are separate from this local development build.
 
+To package a review build without replacing the running app bundle:
+
+```sh
+VAYDEAOS_APP_DIR="$PWD/build/workspace-review/VaydeAOS.app" ./build.sh
+```
+
+This builds and signs the separate bundle without launching or restarting the app.
+
 ## Apple UI CI/CD
 
 [Apple UI CI/CD](.github/workflows/apple-ui.yml) runs on pull requests targeting
@@ -100,12 +108,17 @@ messages. Replies arrive after the model finishes generating.
 - **Stop** cancels the app's request and restores the prompt for editing.
   A server may continue generation after the client disconnects.
 - **New Chat** or **Command-N** creates a separate saved conversation in the selected workspace.
-- The chat sidebar lists that workspace's conversations, newest activity first, with search.
+- The sidebar stays available on the console and in chat. Selecting a workspace opens
+  its console; only the active workspace's conversations appear below it, newest activity
+  first. Search is limited to those conversations.
   Click a chat to restore its transcript and draft; right-click to rename or delete it.
-  The sidebar button beside **Channel Open** toggles the list.
-- The **Workspace** selector below the message field switches workspaces and provides
+  The sidebar button beside **Channel Open** toggles the list; the navigation bar can restore it.
+- The **Workspace** selectors in the console navigation and below the message field switch workspaces and provide
   **New Workspace** and **Rename Workspace**. Each workspace remembers its selected chat
-  and optional task folder. Connection Settings edits the selected workspace's folder;
+  and optional task folder. Each workspace has a console landing page showing its
+  effective task folder, recent chats, notes, focus timer, and activity log.
+  Without a selected folder, task files use `Workspaces/<workspace UUID>` in the app's
+  Application Support directory. Connection Settings edits the selected workspace's folder;
   each chat remembers its provider, API endpoint, models, and reasoning effort.
   Credentials remain shared by account or API endpoint. New chats and workspaces
   inherit the active chat's connection settings, then keep their own changes.
@@ -118,6 +131,12 @@ messages. Replies arrive after the model finishes generating.
   Version 2 of the library also owns per-chat connection settings. Legacy chats
   inherit the previous shared settings together before any chat is edited;
   the original `settings.json` remains untouched as a migration source.
+- Console notes, timer deadlines, activity, Auto Idle, and sidebar visibility are saved
+  separately for each workspace in the same atomic library. Existing global notes and
+  preferences import into the previously selected workspace once; other consoles start empty.
+  Accounts, endpoint credentials, and host telemetry remain shared. Workspace isolation
+  separates app state and default task folders; full-access tools retain their existing
+  filesystem permissions, and explicitly selected folders may overlap.
 - Errors preserve the prompt and completed conversation for retrying.
 
 ## Console and instruments
@@ -138,9 +157,9 @@ The current experimental palette uses the live VaydeNet site's
 blue `#60a5fa` / `#1d4ed8`, and red `#ff4c5b`. Green remains a status color.
 The palette is centralized in `ConsoleTheme.swift`, including the circular activity graph and settings.
 
-- **Workspace** starts at idle with live instruments and four additional widgets:
+- **Console** opens the selected workspace's landing page with recent chats and four widgets:
   an ambient signal field, focus timer with 5/15/25/50-minute presets,
-  locally saved scratchpad, and a timestamped session activity log.
+  locally saved scratchpad, and a timestamped workspace activity log.
 - **Signal Field** replaces the duplicate CPU/RX/TX inspector with a flowing wire
   surface. **Phase Core** replaces the repeated session summary with orbital
   artwork. Both are labeled **Ambient**, contain no telemetry or simulated
@@ -149,14 +168,15 @@ The palette is centralized in `ConsoleTheme.swift`, including the circular activ
 - **Interrupt**, **Command-K**, or typing outside a text editor opens chat in the
   main center column, with the side instruments accessible. Input monitoring is
   limited to this app's window. Dashboard timers and widget state survive switching.
-- **Return to Idle** or **Escape** hides chat without discarding its draft or history.
-  During a request, Escape stops the response first. A completed request or error
-  reopens the channel if it was hidden.
+- **Workspace Console** or **Escape** hides chat without discarding its draft or history.
+  During a request, Escape stops the response first. A completed request reopens
+  the channel if it was hidden. Saved connection errors remain visible on the console.
 - **Auto Idle** returns chat to the dashboard after 60 seconds without keyboard,
   click, or scroll input, only when there is no draft, request, error, or settings sheet.
 - Scratchpad **Edit/Done** controls editing; **To Chat** appends notes to the draft
-  without sending them. Notes and the Auto Idle preference use local UserDefaults.
-  The focus timer and activity log last for the current app session.
+  without sending them. Notes, Auto Idle, the timer, and the latest 40 activity entries
+  persist per workspace. A running timer keeps its deadline while another workspace is open
+  or the app is closed; its completion is recorded once when that console is next observed.
 - **Network** expands the circular activity graph; **Focus** opens chat and hides the side columns.
 - CPU, active/wired/compressed memory, uptime, interface addresses, and primary
   interface traffic come from local macOS APIs. Samples refresh once per second.

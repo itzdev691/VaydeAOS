@@ -57,7 +57,8 @@ public final class ChatSession: ObservableObject {
         store: LocalStore = LocalStore(),
         credentials: any CredentialStoring = KeychainCredentialStore(),
         codex: CodexRuntime? = nil,
-        apiModels: APIModelCatalog? = nil
+        apiModels: APIModelCatalog? = nil,
+        legacyConsole: WorkspaceConsoleState? = nil
     ) {
         let initialLibrary = ChatLibrary(directory: "")
         library = initialLibrary
@@ -68,6 +69,7 @@ public final class ChatSession: ObservableObject {
         self.credentials = credentials
         self.codex = codex ?? CodexRuntime(store: store)
         self.apiModels = apiModels ?? APIModelCatalog()
+        var hasSavedLibrary = false
 
         do {
             if let saved = try store.loadSettings() {
@@ -79,6 +81,7 @@ public final class ChatSession: ObservableObject {
 
         do {
             if let saved = try store.load(ChatLibrary.self, from: "chat-library.json") {
+                hasSavedLibrary = true
                 library = try saved.validated()
                 // Version 2 owns all chat settings; the old defaults file is no longer authoritative.
                 if library.version == 2 { settingsLoadIssue = nil }
@@ -120,6 +123,17 @@ public final class ChatSession: ObservableObject {
         if libraryLoadIssue == nil, settingsLoadIssue == nil {
             library = library.migratingConfigurations(from: settings)
         }
+        // The old console was global. Assign it once to the previously selected
+        // workspace, while other legacy workspaces start with empty consoles.
+        if libraryLoadIssue == nil {
+            for index in library.workspaces.indices {
+                if (!hasSavedLibrary || library.workspaces[index].needsConsoleMigration),
+                   library.workspaces[index].id == selectedWorkspaceID, let legacyConsole {
+                    library.workspaces[index].console = legacyConsole
+                }
+                library.workspaces[index].needsConsoleMigration = false
+            }
+        }
         validateCurrentConfiguration()
         snapshotCurrentChat()
         publishLibrary()
@@ -134,10 +148,7 @@ public final class ChatSession: ObservableObject {
 
     public var contextTransitionNotice: String? {
         var connection = settings
-        if connection.codexWorkspace.isEmpty {
-            connection.codexWorkspace = store.directory.appendingPathComponent("Workspaces/\(selectedWorkspaceID.uuidString)", isDirectory: true).path
-        }
-        connection.codexWorkspace = URL(fileURLWithPath: connection.codexWorkspace).resolvingSymlinksInPath().path
+        connection.codexWorkspace = workspaceDirectory.path
         return codex.contextTransitionNotice(messages: messages, settings: connection)
     }
 
@@ -195,7 +206,7 @@ public final class ChatSession: ObservableObject {
         do {
             var selectedConnection = try settings.validated()
             if selectedConnection.provider == .chatGPT && selectedConnection.codexWorkspace.isEmpty {
-                selectedConnection.codexWorkspace = store.directory.appendingPathComponent("Workspaces/\(selectedWorkspaceID.uuidString)", isDirectory: true).path
+                selectedConnection.codexWorkspace = workspaceDirectory.path
                 try FileManager.default.createDirectory(atPath: selectedConnection.codexWorkspace,
                     withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             }
@@ -277,6 +288,30 @@ public final class ChatSession: ObservableObject {
 
     public var workspaceChats: [SavedChat] {
         chats.filter { $0.workspaceID == selectedWorkspaceID }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// The console and agent always describe the same effective task folder.
+    public var workspaceDirectory: URL {
+        let path = selectedWorkspace.directory
+        return (path.isEmpty
+            ? store.directory.appendingPathComponent("Workspaces/\(selectedWorkspaceID.uuidString)", isDirectory: true)
+            : URL(fileURLWithPath: path, isDirectory: true)).resolvingSymlinksInPath()
+    }
+
+    public var workspaceConsole: WorkspaceConsoleState { selectedWorkspace.console }
+
+    /// Console edits may happen during generation; snapshot the active prompt as well.
+    public func updateWorkspaceConsole(_ update: (inout WorkspaceConsoleState) -> Void) {
+        guard libraryLoadIssue == nil, messagesLoadIssue == nil, recoveryLoadIssue == nil else { return }
+        snapshotCurrentChat()
+        var next = library
+        let index = next.workspaces.firstIndex { $0.id == selectedWorkspaceID }!
+        update(&next.workspaces[index].console)
+        do {
+            try store.save(next, to: "chat-library.json")
+            library = next
+            publishLibrary()
+        } catch { errorMessage = "Could not save workspace console: \(error.localizedDescription)" }
     }
 
     public var canOrganizeChats: Bool { libraryLoadIssue == nil && !isSending && !codex.isRunning && !codex.isChecking }

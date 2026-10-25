@@ -1,19 +1,25 @@
 import SwiftUI
+import VaydeAOSCore
 
 struct WorkspaceWidgets: View {
+    @ObservedObject var session: ChatSession
     var isActive: Bool
-    let events: [WorkspaceEvent]
     let interrupt: (String?) -> Void
-    let record: (String) -> Void
-    @AppStorage("workspace.scratchpad") private var scratchpad = ""
-    @State private var duration = 25
-    @State private var remaining: TimeInterval = 25 * 60
-    @State private var deadline: Date?
     @State private var now = Date()
     @FocusState private var editingNotes: Bool
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    private var seconds: Int { max(0, Int(ceil(deadline?.timeIntervalSince(now) ?? remaining))) }
+    private var timer: WorkspaceFocusTimer { session.workspaceConsole.timer }
+    private var seconds: Int { timer.seconds(at: now) }
+    private var scratchpad: String { session.workspaceConsole.scratchpad }
+    private var events: [WorkspaceEvent] { session.workspaceConsole.events }
+
+    private func completeTimer(at date: Date) {
+        guard let deadline = timer.deadline, date >= deadline else { return }
+        session.updateWorkspaceConsole {
+            if $0.timer.complete(at: date) { $0.record("Focus interval complete") }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -26,13 +32,10 @@ struct WorkspaceWidgets: View {
                 activityCard
             }
         }
+        .onAppear { now = Date(); completeTimer(at: now) }
         .onReceive(ticker) { date in
             now = date
-            if let deadline, date >= deadline {
-                self.deadline = nil
-                remaining = 0
-                record("Focus interval complete")
-            }
+            completeTimer(at: date)
         }
     }
 
@@ -43,34 +46,31 @@ struct WorkspaceWidgets: View {
     }
 
     private var timerCard: some View {
-        ConsolePanel(title: "FOCUS TIMER", index: "04", status: deadline == nil ? "READY" : "COUNTING") {
+        ConsolePanel(title: "FOCUS TIMER", index: "04", status: timer.deadline == nil ? "READY" : "COUNTING") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(String(format: "%02d:%02d", seconds / 60, seconds % 60))
                         .font(Console.mono(33, weight: .light)).monospacedDigit()
                     Spacer()
-                    Menu("\(duration) MIN") {
+                    Menu("\(timer.duration) MIN") {
                         ForEach([5, 15, 25, 50], id: \.self) { minutes in
                             Button("\(minutes) minutes") {
-                                duration = minutes; remaining = Double(minutes * 60); deadline = nil
+                                session.updateWorkspaceConsole { $0.timer.reset(minutes: minutes) }
                             }
                         }
-                    }.font(Console.mono(9)).fixedSize().disabled(deadline != nil)
+                    }.font(Console.mono(9)).fixedSize().disabled(timer.deadline != nil)
                 }
-                ProgressView(value: Double(seconds), total: Double(duration * 60)).tint(Console.blue)
+                ProgressView(value: Double(seconds), total: Double(timer.duration * 60)).tint(Console.blue)
                 HStack(spacing: 8) {
                     Button {
-                        if let deadline {
-                            remaining = max(0, deadline.timeIntervalSinceNow); self.deadline = nil
-                            record("Focus timer paused")
-                        } else {
-                            if remaining <= 0 { remaining = Double(duration * 60) }
-                            now = Date(); deadline = now.addingTimeInterval(remaining)
-                            record("Focus timer started")
+                        now = Date()
+                        session.updateWorkspaceConsole {
+                            $0.timer.toggle(at: now)
+                            $0.record($0.timer.deadline == nil ? "Focus timer paused" : "Focus timer started")
                         }
-                    } label: { Label(deadline == nil ? "START" : "PAUSE", systemImage: deadline == nil ? "play" : "pause") }
+                    } label: { Label(timer.deadline == nil ? "START" : "PAUSE", systemImage: timer.deadline == nil ? "play" : "pause") }
                         .buttonStyle(ConsoleButtonStyle())
-                    Button { deadline = nil; remaining = Double(duration * 60); record("Focus timer reset") } label: {
+                    Button { session.updateWorkspaceConsole { $0.timer.reset(); $0.record("Focus timer reset") } } label: {
                         Image(systemName: "arrow.counterclockwise")
                     }.buttonStyle(ConsoleButtonStyle()).accessibilityLabel("Reset focus timer")
                     Spacer(minLength: 0)
@@ -88,7 +88,9 @@ struct WorkspaceWidgets: View {
                             .padding(.top, 8).padding(.leading, 5).allowsHitTesting(false)
                     }
                     if editingNotes {
-                        TextEditor(text: $scratchpad).scrollContentBackground(.hidden).focused($editingNotes)
+                        TextEditor(text: Binding(get: { scratchpad }, set: { value in
+                            session.updateWorkspaceConsole { $0.scratchpad = value }
+                        })).scrollContentBackground(.hidden).focused($editingNotes)
                             .accessibilityLabel("Scratchpad")
                     } else {
                         Text(scratchpad.isEmpty ? " " : scratchpad)
@@ -110,9 +112,12 @@ struct WorkspaceWidgets: View {
     }
 
     private var activityCard: some View {
-        ConsolePanel(title: "ACTIVITY LOG", index: "06", status: "THIS SESSION") {
+        ConsolePanel(title: "ACTIVITY LOG", index: "06", status: "SAVED IN WORKSPACE") {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    if events.isEmpty {
+                        Text("No activity in this workspace yet.").font(Console.mono(10)).foregroundStyle(Console.muted)
+                    }
                     ForEach(events.reversed()) { event in
                         HStack(alignment: .top, spacing: 9) {
                             Circle().fill(Console.blue).frame(width: 4, height: 4).padding(.top, 4)

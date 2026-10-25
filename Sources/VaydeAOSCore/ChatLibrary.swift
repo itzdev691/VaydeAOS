@@ -5,6 +5,24 @@ public struct ChatWorkspace: Identifiable, Codable, Equatable, Sendable {
     public var name: String
     public var directory: String
     public var selectedChatID: UUID
+    public var console = WorkspaceConsoleState()
+    var needsConsoleMigration = false
+
+    init(id: UUID, name: String, directory: String, selectedChatID: UUID) {
+        self.id = id; self.name = name; self.directory = directory; self.selectedChatID = selectedChatID
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, directory, selectedChatID, console }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        directory = try values.decode(String.self, forKey: .directory)
+        selectedChatID = try values.decode(UUID.self, forKey: .selectedChatID)
+        console = try values.decodeIfPresent(WorkspaceConsoleState.self, forKey: .console) ?? WorkspaceConsoleState()
+        needsConsoleMigration = !values.contains(.console)
+    }
 }
 
 public struct SavedChat: Identifiable, Codable, Equatable, Sendable {

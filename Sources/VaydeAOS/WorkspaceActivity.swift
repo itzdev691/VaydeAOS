@@ -38,9 +38,3 @@ struct WorkspaceInputMonitor: NSViewRepresentable {
         deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
     }
 }
-
-struct WorkspaceEvent: Identifiable {
-    let id = UUID()
-    let date = Date()
-    let title: String
-}

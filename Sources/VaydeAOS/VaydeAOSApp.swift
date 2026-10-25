@@ -5,7 +5,7 @@ import VaydeAOSCore
 @main
 struct VaydeAOSApp: App {
     @NSApplicationDelegateAdaptor(VaydeAOSAppDelegate.self) private var appDelegate
-    @StateObject private var session = ChatSession()
+    @StateObject private var session = ChatSession(legacyConsole: legacyConsoleState())
     @State private var showingConnectionSettings = false
     @State private var startupComplete = false
     @AppStorage("startup.soundEnabled") private var startupSoundEnabled = true
@@ -47,6 +47,15 @@ struct VaydeAOSApp: App {
             }
         }
     }
+}
+
+private func legacyConsoleState() -> WorkspaceConsoleState {
+    let defaults = UserDefaults.standard
+    var console = WorkspaceConsoleState()
+    console.scratchpad = defaults.string(forKey: "workspace.scratchpad") ?? ""
+    console.autoIdle = defaults.object(forKey: "workspace.autoIdle") as? Bool ?? true
+    console.sidebarVisible = defaults.object(forKey: "chat.sidebarVisible") as? Bool ?? true
+    return console
 }
 
 final class VaydeAOSAppDelegate: NSObject, NSApplicationDelegate {

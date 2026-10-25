@@ -12,7 +12,7 @@ esac
 cd "$project_dir"
 swift build --configuration "$configuration" --product VaydeAOS
 binary_dir="$(swift build --configuration "$configuration" --show-bin-path)"
-app_dir="$project_dir/build/VaydeAOS.app"
+app_dir="${VAYDEAOS_APP_DIR:-$project_dir/build/VaydeAOS.app}"
 
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$binary_dir/VaydeAOS" "$app_dir/Contents/MacOS/VaydeAOS"
@@ -43,7 +43,7 @@ fi
 if [ -d "$app_dir/Contents/Resources/ChatGPT" ]; then
     rm -rf "$app_dir/Contents/Resources/ChatGPT"
 fi
-python3 "$project_dir/scripts/prepare-codex-runtime.py"
+VAYDEAOS_APP_DIR="$app_dir" python3 "$project_dir/scripts/prepare-codex-runtime.py"
 codesign --force --sign - "$app_dir"
 
 printf 'Built %s\n' "$app_dir"

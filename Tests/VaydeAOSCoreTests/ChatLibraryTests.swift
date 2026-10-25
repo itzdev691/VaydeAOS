@@ -9,6 +9,112 @@ final class ChatLibraryTests {
     deinit { try? FileManager.default.removeItem(at: directory) }
     private var store: LocalStore { LocalStore(directory: directory) }
 
+    @Test func consoleStateAndTaskFilesStayInTheirWorkspaceAcrossRelaunch() throws {
+        let session = ChatSession(client: WorkspaceClient(), store: store)
+        let first = session.selectedWorkspaceID
+        let firstChat = session.selectedChatID
+        let firstFolder = session.workspaceDirectory
+        let start = Date()
+        session.draft = "First workspace draft"
+        session.updateWorkspaceConsole {
+            $0.scratchpad = "Private first notes"
+            $0.autoIdle = false
+            $0.sidebarVisible = false
+            $0.timer.reset(minutes: 5)
+            $0.timer.toggle(at: start)
+            $0.record("First workspace action")
+        }
+        try FileManager.default.createDirectory(at: firstFolder, withIntermediateDirectories: true)
+        try Data("first task output".utf8).write(to: firstFolder.appendingPathComponent("output.txt"))
+        let firstConsole = session.workspaceConsole
+        session.createWorkspace(named: "Engineering")
+        let second = session.selectedWorkspaceID
+        let secondChat = session.selectedChatID
+        let secondFolder = session.workspaceDirectory
+        #expect(secondFolder != firstFolder)
+        #expect(!FileManager.default.fileExists(atPath: secondFolder.appendingPathComponent("output.txt").path))
+        #expect(session.workspaceConsole == WorkspaceConsoleState())
+        #expect(session.workspaceChats.map(\.id) == [secondChat])
+        session.selectChat(firstChat)
+        #expect(session.selectedChatID == secondChat)
+        session.updateWorkspaceConsole { $0.scratchpad = "Engineering notes"; $0.record("Engineering action") }
+        session.draft = "Engineering draft"
+        session.saveDraft()
+        let restored = ChatSession(client: WorkspaceClient(), store: store)
+        #expect(restored.selectedWorkspaceID == second)
+        #expect(restored.workspaceConsole.scratchpad == "Engineering notes")
+        #expect(restored.workspaceConsole.events.map(\.title) == ["Engineering action"])
+        #expect(restored.draft == "Engineering draft")
+        restored.selectWorkspace(first)
+        #expect(restored.workspaceConsole == firstConsole)
+        #expect(restored.workspaceDirectory.path == firstFolder.path)
+        #expect(restored.draft == "First workspace draft")
+        #expect(restored.workspaceConsole.timer.seconds(at: start.addingTimeInterval(30)) == 270)
+        #expect(try String(contentsOf: firstFolder.appendingPathComponent("output.txt"), encoding: .utf8) == "first task output")
+    }
+
+    @Test func consoleWriteFailureKeepsPublishedNotesAndOtherWorkspaceIntact() throws {
+        let session = ChatSession(client: WorkspaceClient(), store: store)
+        session.updateWorkspaceConsole { $0.scratchpad = "Saved notes" }
+        let before = session.workspaces
+        let url = directory.appendingPathComponent("chat-library.json")
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        try Data("block replacement".utf8).write(to: url.appendingPathComponent("blocker"))
+        session.updateWorkspaceConsole { $0.scratchpad = "Unsaved notes"; $0.record("Unsaved action") }
+        #expect(session.workspaces == before)
+        #expect(session.errorMessage?.contains("Could not save workspace console") == true)
+    }
+
+    @Test func preConsoleLibrariesLoadWithoutLosingChatsOrChangingOriginalFile() throws {
+        let library = ChatLibrary(directory: "").migratingConfigurations(from: .local)
+        let encoder = JSONEncoder()
+        var json = try #require(JSONSerialization.jsonObject(with: encoder.encode(library)) as? [String: Any])
+        var workspaces = try #require(json["workspaces"] as? [[String: Any]])
+        workspaces[0].removeValue(forKey: "console")
+        json["workspaces"] = workspaces
+        let original = try JSONSerialization.data(withJSONObject: json)
+        let url = directory.appendingPathComponent("chat-library.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try original.write(to: url)
+        var legacy = WorkspaceConsoleState()
+        legacy.scratchpad = "Original global notes"
+        legacy.autoIdle = false
+        let session = ChatSession(client: WorkspaceClient(), store: store, legacyConsole: legacy)
+        #expect(session.selectedChatID == library.chats[0].id)
+        #expect(session.workspaceConsole == legacy)
+        #expect(session.errorMessage == nil)
+        #expect(try Data(contentsOf: url) == original)
+        let originalWorkspace = session.selectedWorkspaceID
+        session.createWorkspace(named: "Clean console")
+        #expect(session.workspaceConsole == WorkspaceConsoleState())
+        let restored = ChatSession(client: WorkspaceClient(), store: store, legacyConsole: legacy)
+        #expect(restored.workspaceConsole == WorkspaceConsoleState())
+        restored.selectWorkspace(originalWorkspace)
+        #expect(restored.workspaceConsole == legacy)
+        restored.updateWorkspaceConsole { $0.scratchpad = "" }
+        #expect(ChatSession(client: WorkspaceClient(), store: store, legacyConsole: legacy).workspaceConsole.scratchpad.isEmpty)
+    }
+
+    @Test func focusTimerResumesPausedTimeAndCompletesOnlyOnceAfterRelaunch() throws {
+        var timer = WorkspaceFocusTimer()
+        let start = Date(timeIntervalSince1970: 1_000)
+        timer.reset(minutes: 5)
+        timer.toggle(at: start)
+        timer.toggle(at: start.addingTimeInterval(40))
+        #expect(timer.seconds(at: start.addingTimeInterval(600)) == 260)
+        timer.toggle(at: start.addingTimeInterval(600))
+        var restored = try JSONDecoder().decode(WorkspaceFocusTimer.self, from: JSONEncoder().encode(timer))
+        #expect(restored.seconds(at: start.addingTimeInterval(700)) == 160)
+        let earlyCompletion = restored.complete(at: start.addingTimeInterval(700))
+        let completion = restored.complete(at: start.addingTimeInterval(900))
+        let duplicate = restored.complete(at: start.addingTimeInterval(901))
+        #expect(!earlyCompletion)
+        #expect(completion)
+        #expect(!duplicate)
+        #expect(restored.seconds(at: start.addingTimeInterval(901)) == 0)
+    }
+
     @Test func legacyHistoryAndRecoveryMigrateWithoutChangingOriginalFiles() throws {
         let history = [ChatMessage(role: .user, content: "Original question"), ChatMessage(role: .assistant, content: "Answer")]
         let attempt = InterruptedTurn(message: ChatMessage(role: .user, content: "Retry"), originalDraft: "  Retry\n",

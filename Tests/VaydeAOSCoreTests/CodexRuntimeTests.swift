@@ -482,6 +482,39 @@ final class CodexRuntimeTests {
         #expect(restored.codex.threadID == "thread-1")
     }
 
+    @Test func workspaceConsolesUseSeparateRuntimeFoldersAndResumeOnlyTheirOwnThread() async throws {
+        let runtime = try makeRuntime(mode: "multipleThreads")
+        defer { runtime.shutdown() }
+        let session = ChatSession(store: LocalStore(directory: directory), codex: runtime)
+        var settings = configuration()
+        settings.codexWorkspace = ""
+        settings.chatGPTModel = "fixture-model"
+        try session.saveSettings(settings, apiKey: "")
+        let firstWorkspace = session.selectedWorkspaceID
+        let firstFolder = session.workspaceDirectory.path
+        session.draft = "First workspace task"; session.send(); await session.sendTask?.value
+        #expect(runtime.threadID == "thread-1")
+        session.updateWorkspaceConsole { $0.scratchpad = "First workspace notes" }
+        session.createWorkspace(named: "Second workspace")
+        let secondFolder = session.workspaceDirectory.path
+        #expect(runtime.threadID == nil)
+        #expect(runtime.activity.isEmpty)
+        #expect(session.workspaceConsole.scratchpad.isEmpty)
+        session.draft = "Second workspace task"; session.send(); await session.sendTask?.value
+        #expect(runtime.threadID == "thread-2")
+        session.selectWorkspace(firstWorkspace)
+        #expect(runtime.threadID == "thread-1")
+        #expect(session.workspaceConsole.scratchpad == "First workspace notes")
+        session.draft = "First workspace follow-up"; session.send(); await session.sendTask?.value
+        let calls = try requests()
+        let starts = calls.filter { $0["method"].text == "thread/start" }
+        #expect(starts.map { $0["params"]["cwd"].text } == [firstFolder, secondFolder])
+        let resumed = try #require(calls.last { $0["method"].text == "thread/resume" })
+        #expect(resumed["params"]["cwd"].text == firstFolder)
+        #expect(resumed["params"]["threadId"].text == "thread-1")
+        #expect(session.messages.map(\.content) == ["First workspace task", "Final café", "First workspace follow-up", "Final café"])
+    }
+
     @Test(arguments: ["missing", "effort"])
     func unavailableModelsAndUnsupportedEffortNeverStartThreadsOrTurns(mode: String) async throws {
         let runtime = try makeRuntime()

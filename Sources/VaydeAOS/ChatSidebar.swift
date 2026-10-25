@@ -4,8 +4,8 @@ import VaydeAOSCore
 struct ChatSidebar: View {
     @ObservedObject var session: ChatSession
     let openChat: () -> Void
-    @AppStorage("chat.collapsedWorkspaceIDs") private var collapsedWorkspaceIDs = ""
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let openConsole: () -> Void
+    let isChatOpen: Bool
     @State private var search = ""
     @State private var renaming: SavedChat?
     @State private var deleting: SavedChat?
@@ -14,13 +14,6 @@ struct ChatSidebar: View {
     @State private var name = ""
 
     private var query: String { search.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var collapsedIDs: Set<String> {
-        Set(collapsedWorkspaceIDs.split(separator: ",").map(String.init))
-    }
-    private var visibleWorkspaces: [ChatWorkspace] {
-        session.workspaces.filter { query.isEmpty || matches($0.name) || !chats(in: $0).isEmpty }
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
@@ -36,8 +29,8 @@ struct ChatSidebar: View {
 
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Console.muted)
-                TextField("Search chats", text: $search).textFieldStyle(.plain)
-                    .accessibilityLabel("Search all workspaces and chats")
+                TextField("Search this workspace", text: $search).textFieldStyle(.plain)
+                    .accessibilityLabel("Search chats in the current workspace")
                 if !search.isEmpty {
                     Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
                         .buttonStyle(.plain).foregroundStyle(Console.muted)
@@ -49,7 +42,7 @@ struct ChatSidebar: View {
             .padding(.bottom, 20)
 
             HStack {
-                Text("Projects").font(.system(size: 11, weight: .medium)).foregroundStyle(Console.muted)
+                Text("Workspaces").font(.system(size: 11, weight: .medium)).foregroundStyle(Console.muted)
                 Spacer()
                 Button { name = ""; creatingWorkspace = true } label: {
                     Image(systemName: "plus").font(.system(size: 11))
@@ -61,12 +54,27 @@ struct ChatSidebar: View {
             }.padding(.leading, 10).padding(.trailing, 4).padding(.bottom, 5)
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(visibleWorkspaces) { workspace in
-                        workspaceGroup(workspace)
+                LazyVStack(alignment: .leading, spacing: 3) {
+                    ForEach(session.workspaces) { workspace in
+                        workspaceRow(workspace)
                     }
-                    if visibleWorkspaces.isEmpty {
-                        Text("No matching chats or projects")
+                    Divider().padding(.vertical, 12)
+                    Button(action: openConsole) {
+                        Label("Workspace console", systemImage: "square.grid.2x2")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(ChatSidebarRowStyle(selected: !isChatOpen))
+                    .accessibilityValue(isChatOpen ? "" : "Selected")
+                    HStack {
+                        Text(session.selectedWorkspace.name).lineLimit(1)
+                        Spacer()
+                        Text("\(session.workspaceChats.count)")
+                    }
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(Console.muted)
+                    .padding(.horizontal, 10).padding(.top, 16).padding(.bottom, 5)
+                    ForEach(visibleChats) { chat in chatRow(chat) }
+                    if visibleChats.isEmpty {
+                        Text("No matching chats in this workspace")
                             .font(.system(size: 12)).foregroundStyle(Console.muted)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(10)
                     }
@@ -113,21 +121,13 @@ struct ChatSidebar: View {
                 editingWorkspace = nil
             }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        .onChange(of: session.selectedWorkspaceID) { id in setExpanded(true, for: id) }
+        .onChange(of: session.selectedWorkspaceID) { _ in search = "" }
     }
 
     private func matches(_ value: String) -> Bool { value.localizedCaseInsensitiveContains(query) }
 
-    private func chats(in workspace: ChatWorkspace) -> [SavedChat] {
-        session.chats.filter {
-            $0.workspaceID == workspace.id && (query.isEmpty || matches(workspace.name) || matches($0.title))
-        }.sorted { $0.updatedAt > $1.updatedAt }
-    }
-
-    private func setExpanded(_ expanded: Bool, for id: UUID) {
-        var ids = collapsedIDs
-        if expanded { ids.remove(id.uuidString) } else { ids.insert(id.uuidString) }
-        collapsedWorkspaceIDs = ids.sorted().joined(separator: ",")
+    private var visibleChats: [SavedChat] {
+        session.workspaceChats.filter { query.isEmpty || matches($0.title) }
     }
 
     private func activateWorkspace(_ id: UUID) -> Bool {
@@ -138,57 +138,38 @@ struct ChatSidebar: View {
 
     private func newChat(in workspace: ChatWorkspace) {
         guard activateWorkspace(workspace.id) else { return }
-        setExpanded(true, for: workspace.id)
         session.newChat()
         openChat()
     }
 
-    private func workspaceGroup(_ workspace: ChatWorkspace) -> some View {
-        let expanded = !query.isEmpty || !collapsedIDs.contains(workspace.id.uuidString)
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 0) {
-                Button {
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) {
-                        setExpanded(!expanded, for: workspace.id)
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .rotationEffect(.degrees(expanded ? 90 : 0)).frame(width: 10)
-                        Image(systemName: "folder").font(.system(size: 13))
-                        Text(workspace.name).font(.system(size: 12, weight: .medium))
-                            .lineLimit(1).truncationMode(.middle)
-                        Spacer(minLength: 0)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(ChatSidebarRowStyle())
-                .disabled(!query.isEmpty)
-                .accessibilityLabel(workspace.name)
-                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-                .help(query.isEmpty ? "Show or hide chats in \(workspace.name)" : "Matching folders are expanded while searching")
-                .contextMenu {
-                    Button("New Chat") { newChat(in: workspace) }
-                        .disabled(!session.canOrganizeChats)
-                    Button("Rename Workspace…") { name = workspace.name; editingWorkspace = workspace }
-                        .disabled(!session.canOrganizeChats)
-                }
-                Button { newChat(in: workspace) } label: {
-                    Image(systemName: "plus").font(.system(size: 11))
-                        .frame(width: 26, height: 28).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain).foregroundStyle(Console.muted)
-                .disabled(!session.canOrganizeChats)
-                .accessibilityLabel("New chat in \(workspace.name)").help("New chat in \(workspace.name)")
+    private func workspaceRow(_ workspace: ChatWorkspace) -> some View {
+        let selected = workspace.id == session.selectedWorkspaceID
+        return Button {
+            guard activateWorkspace(workspace.id) else { return }
+            openConsole()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "square.stack.3d.up")
+                Text(workspace.name).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+                if selected { Circle().fill(Console.blue).frame(width: 5, height: 5) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(ChatSidebarRowStyle(selected: selected))
+        .disabled(!session.canOrganizeChats)
+        .accessibilityLabel("Open \(workspace.name) workspace console")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .contextMenu {
+            Button("Open Console") {
+                if activateWorkspace(workspace.id) { openConsole() }
             }
-            if expanded {
-                ForEach(chats(in: workspace)) { chat in chatRow(chat) }
-            }
+            Button("New Chat") { newChat(in: workspace) }
+            Button("Rename Workspace…") { name = workspace.name; editingWorkspace = workspace }
         }
     }
 
     private func chatRow(_ chat: SavedChat) -> some View {
-        let selected = chat.id == session.selectedChatID
+        let selected = isChatOpen && chat.id == session.selectedChatID
         return Button {
             guard activateWorkspace(chat.workspaceID) else { return }
             session.selectChat(chat.id)
@@ -201,7 +182,7 @@ struct ChatSidebar: View {
                 Text(chat.title).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
             }
-            .padding(.leading, 26).frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 8).frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(ChatSidebarRowStyle(selected: selected))
         .disabled(!session.canOrganizeChats)
@@ -247,6 +228,7 @@ private struct ChatSidebarRowStyle: ButtonStyle {
 
 struct ChatWorkspacePicker: View {
     @ObservedObject var session: ChatSession
+    var openConsole: (() -> Void)? = nil
     @State private var editingName = false
     @State private var creating = false
     @State private var name = ""
@@ -254,7 +236,10 @@ struct ChatWorkspacePicker: View {
     var body: some View {
         Menu {
             ForEach(session.workspaces) { workspace in
-                Button { session.selectWorkspace(workspace.id) } label: {
+                Button {
+                    session.selectWorkspace(workspace.id)
+                    if session.selectedWorkspaceID == workspace.id { openConsole?() }
+                } label: {
                     if workspace.id == session.selectedWorkspaceID {
                         Label(workspace.name, systemImage: "checkmark")
                     } else { Text(workspace.name) }
@@ -270,7 +255,7 @@ struct ChatWorkspacePicker: View {
         .menuStyle(.borderlessButton).fixedSize().frame(maxWidth: 230, alignment: .leading)
         .foregroundStyle(Console.blue).disabled(!session.canOrganizeChats)
         .accessibilityLabel("Workspace").accessibilityValue(session.selectedWorkspace.name)
-        .help("Choose the workspace whose chats appear in the sidebar")
+        .help("Open a workspace console")
         .alert(creating ? "New workspace" : "Rename workspace", isPresented: $editingName) {
             TextField("Workspace name", text: $name)
             Button("Cancel", role: .cancel) { }
@@ -278,6 +263,6 @@ struct ChatWorkspacePicker: View {
                 if creating { session.createWorkspace(named: name) }
                 else { session.renameWorkspace(session.selectedWorkspaceID, to: name) }
             }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        } message: { Text("Workspaces keep separate chat histories. Set a task folder in Connection Settings when needed.") }
+        } message: { Text("Each workspace has its own console, notes, timer, activity, chats, and task folder.") }
     }
 }
