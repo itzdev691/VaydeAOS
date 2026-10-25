@@ -119,20 +119,27 @@ struct ChatGPTTests {
     }
 
     @Test func shutdownFailsPendingRequestsAndAllowsRestart() async throws {
-        let fixture = try ProcessFixture()
+        // Model a cold hosted Python startup that exceeded the old five-second
+        // deadline. Readiness must depend on protocol progress, not launch speed.
+        let fixture = try ProcessFixture(startupDelay: 6)
         defer { fixture.remove() }
         let helper = ChatGPTHelper(helperDirectory: fixture.directory)
         let requests = [ChatGPTHelperRequest(method: "wait"), ChatGPTHelperRequest(method: "wait")]
-        let tasks = requests.map { request in Task { try await helper.request(request) } }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while !requests.allSatisfy({ FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent($0.id).path) }) {
-            guard ContinuousClock.now < deadline else {
-                await helper.shutdown()
-                Issue.record("Helper did not receive both requests before shutdown")
-                return
+        let (ready, signal) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingOldest(2))
+        let tasks = requests.map { request in
+            Task {
+                // If startup fails, end readiness observation instead of leaving
+                // the test waiting for a signal that can no longer arrive.
+                defer { signal.finish() }
+                return try await helper.request(request, onDelta: { _ in _ = signal.yield(request.id) })
             }
-            try await Task.sleep(nanoseconds: 1_000_000)
         }
+        var received = Set<String>()
+        for await id in ready {
+            received.insert(id)
+            if received.count == requests.count { break }
+        }
+        #expect(received == Set(requests.map(\.id)))
         await helper.shutdown()
         for task in tasks {
             do { _ = try await task.value; Issue.record("Shutdown reported a pending request as successful") }
@@ -187,7 +194,7 @@ private actor FakePlanHelper: ChatGPTHelping {
 
 private struct ProcessFixture {
     let directory: URL
-    init() throws {
+    init(startupDelay: TimeInterval = 0) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let launcher = directory.appendingPathComponent("node")
@@ -195,7 +202,8 @@ private struct ProcessFixture {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: launcher.path)
         try FileManager.default.createSymbolicLink(at: directory.appendingPathComponent("credential-vault"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/true"))
         let script = #"""
-        import json, os, sys
+        import json, os, sys, time
+        time.sleep(\#(startupDelay))
         for line in sys.stdin:
             request = json.loads(line)
             method = request['method']
@@ -204,7 +212,7 @@ private struct ProcessFixture {
                 print('not JSON', flush=True)
                 continue
             if method == 'wait':
-                with open(request['id'], 'w') as started: started.write('ready')
+                print(json.dumps({'id': request['id'], 'kind': 'delta', 'delta': 'ready'}), flush=True)
                 continue
             if method == 'cancel': continue
             if method == 'stream':
