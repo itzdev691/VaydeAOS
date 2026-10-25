@@ -45,11 +45,35 @@ source and protocol tests remain in
 the repository as historical compatibility code, outside the app's execution path.
 
 One active task is supported. Reasoning effort applies to subsequent turns.
+The composer and Connection Settings use the runtime's model catalog and reported
+reasoning options. Account default resolves to the advertised default model, or the
+first returned model when no default is marked; the label and request use the same
+resolution. Explicitly unavailable models and unsupported effort levels are flagged
+before sending. Runtime preflight also reloads the catalog and validates before
+creating/resuming a thread or starting inference. A catalog entry is not proof of
+account entitlement; server-side authentication and request errors still apply.
+The model-list contract is documented in the [official app-server model reference](https://learn.chatgpt.com/docs/app-server#models).
+
 Changes to workspace, model, reasoning mode, or write access start a new runtime
 thread with the visible conversation provided as labeled historical context.
 The current user message is the only new action request. A matching saved thread
 is resumed without replaying its prior tool calls. A failed resume is surfaced;
 there is no automatic fresh-thread fallback or action retry.
+
+The composer warns before a send that needs a fresh runtime thread. The affected
+assistant response retains a context-transfer label after relaunch. Every new
+completed answer also saves provider/model attribution: API response and runtime
+handshake model values are labeled reported; an omitted model is explicitly
+identified as the runtime selection or requested model. Older answers remain
+unattributed. Attribution is display metadata and is never added to model prompts
+or transcript digests.
+
+The 1 MiB UTF-8 limit applies to each submitted text payload, including replayed
+history when a fresh thread is required. Its check runs before `thread/start`,
+`thread/resume`, or changing the stored thread link/interrupted marker. Rejection
+preserves both the visible transcript and original runtime link. This byte limit
+is separate from model context capacity; a context meter and automatic history
+summarization are outside this change.
 
 ## Permissions and cancellation
 
@@ -103,7 +127,28 @@ prior completed and interrupted history. The legacy `conversation.json`,
 `interrupted-turns.json`, and `codex-session.json` are imported into the first chat
 without rewriting the original files. The workspace selector below the composer
 selects a separate chat group and task folder; each group remembers its selected chat.
-Accounts and model settings remain shared. Stop generation before switching chats.
+Each chat saves its provider, API endpoint, models, and reasoning effort. Accounts
+and endpoint-scoped credentials remain shared; task folders belong to workspaces.
+New chats inherit the active settings. Switching chats restores their saved settings
+before the next request, including the model needed to resume their runtime thread.
+Stop generation before switching chats.
+
+The version 2 chat library is authoritative for connection settings. Version 1
+chats are seeded together from the former shared settings before the first edit.
+Migration preserves the original `settings.json`; later changes to that legacy
+file do not override configured chats. Configuration and workspace-folder changes
+use one atomic library write and become active only after that write succeeds.
+
+Compatible API/Ollama discovery uses the configured base URL plus `/models`.
+See [OpenAI's model-list schema](https://developers.openai.com/api/reference/resources/models/methods/list)
+and [Ollama's compatibility reference](https://docs.ollama.com/api/openai-compatibility).
+The standard list supplies identifiers, not reasoning capability guarantees.
+VaydeAOS treats missing metadata as unknown, offers Auto, and labels retained
+explicit efforts unverified. Optional compatible-server `supported_reasoning_efforts`
+and `default_reasoning_effort` fields enable capability filtering when provided.
+Discovery is read-only, endpoint-scoped, redirect-free, and keeps keys and raw
+provider error bodies out of UI errors. Failed discovery retains manual identifiers
+and any prior catalog; it never substitutes another model or changes saved settings.
 
 The stdout reader applies pipe backpressure when the UI is busy instead of dropping
 queued chunks and disconnecting. It drains stdout before handling process exit,
@@ -152,6 +197,21 @@ VAYDEAOS_CODEX_MCP=1 ./test.sh --filter bundledMCPReadOnlySmokeWhenExplicitlyEna
 This calls only `list_allowed_directories`; it does not establish permission to
 control Dock or other native apps. Host app permissions still apply, and shell
 commands that create temporary files still require write permission.
+
+An opt-in live model-switch acceptance test makes three small inference requests
+using the exact bundled runtime and the app's session/storage code, in an isolated
+temporary workspace. It verifies model A -> model B -> session/runtime relaunch ->
+continuation of B's original thread, response attribution, and retained marker
+context without executing model tools:
+
+```sh
+VAYDEAOS_CODEX_SMOKE="$PWD/build/VaydeAOS.app/Contents/Resources/Codex/bin/codex" \
+VAYDEAOS_CODEX_ACCEPTANCE=1 ./test.sh --filter bundledModelSwitchAcceptanceWhenExplicitlyEnabled
+```
+
+This validates the live app-core workflow and packaged runtime, not native UI
+clicks. Native startup is checked separately by `scripts/ci-ui-smoke.swift`;
+controls can also be rendered directly with `NSHostingView` for layout inspection.
 
 Adding `VAYDEAOS_CODEX_LIVE=1` makes one model request against the configured Codex
 account, reads a marker file in a temporary workspace, and checks the

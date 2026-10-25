@@ -80,7 +80,13 @@ boundaries, history, migration, and validation.
 
 Open the header settings control or **Configure Uplink** to set the API base URL, model name, and optional API key.
 
-The **Reasoning Mode** slider above **Configure Uplink** saves the effort for subsequent requests: Auto, None, Minimal, Low, Medium, High, Extra high, or Max. Auto preserves the model default. Supported levels depend on the selected model and provider. The setting applies to both compatible APIs and ChatGPT plan requests.
+The **Reasoning Mode** slider above **Configure Uplink** saves this chat's effort for subsequent requests. It offers Auto plus only the selected model's reported levels, including provider-defined levels. Auto omits the effort parameter. Unsupported saved choices remain visible with an error and block sending until corrected; choosing another model does not silently reset the saved effort.
+
+The composer also has model and reasoning menus, a catalog refresh control, and a connection-settings shortcut. These remain available in Focus mode and narrow windows. The chat header, sidebar, and account-default menu resolve **Account default** to the runtime catalog's actual model name. Until the catalog loads, the default is labeled unresolved.
+
+For Ollama and compatible APIs, **Discover models** in Connection Settings reads the selected endpoint's `GET /models` with its API key. It never sends a prompt or follows redirects. Endpoint edits and unsaved keys use a separate discovery state; saved credentials remain scoped to their endpoint. Refresh in the composer reloads the active connection's catalog. Manual model identifiers remain available if discovery is unsupported or fails. A successfully loaded catalog flags models absent from that list; listing a model does not prove inference entitlement or text-chat support.
+
+Standard API model lists may omit reasoning capabilities. In that case, controls offer Auto and explain that support is unreported; existing explicit levels remain labeled unverified. Compatible servers can advertise `supported_reasoning_efforts` (an array of strings) and `default_reasoning_effort` as optional model-list extensions. No capabilities are inferred from model names. ChatGPT uses the runtime's `supportedReasoningEfforts` and `defaultReasoningEffort` metadata and validates a fresh catalog before starting a thread or inference turn.
 The default is local Ollama at `http://127.0.0.1:11434/v1` with `qwen3.5:9b`.
 Ollama must be running with the selected model installed. Change the model name
 to use a different installed model.
@@ -100,13 +106,18 @@ messages. Replies arrive after the model finishes generating.
 - The **Workspace** selector below the message field switches workspaces and provides
   **New Workspace** and **Rename Workspace**. Each workspace remembers its selected chat
   and optional task folder. Connection Settings edits the selected workspace's folder;
-  the account, model, and reasoning setting remain shared.
+  each chat remembers its provider, API endpoint, models, and reasoning effort.
+  Credentials remain shared by account or API endpoint. New chats and workspaces
+  inherit the active chat's connection settings, then keep their own changes.
 - Chat and workspace switching is disabled during generation; stop the response first.
   Chats keep separate model context, unsent drafts, interrupted attempts, and runtime
   thread links. The selected workspace and chat return after relaunch.
 - Existing single-chat history imports into **Personal**. Original legacy files remain
   untouched. The new atomic `chat-library.json` stores chats, drafts, and membership;
   `codex-<chat UUID>.json` stores each chat's runtime audit and resume link.
+  Version 2 of the library also owns per-chat connection settings. Legacy chats
+  inherit the previous shared settings together before any chat is edited;
+  the original `settings.json` remains untouched as a migration source.
 - Errors preserve the prompt and completed conversation for retrying.
 
 ## Console and instruments
@@ -184,13 +195,28 @@ unchanged and are used again after restarting. This option also appears when
 editing an endpoint that already uses a session key. **Save** still attempts to
 store the key in Keychain.
 
-This version provides text chat. File access, Obsidian retrieval, and agent tools
-remain outside the implemented interface.
+The compatible API connection provides text chat. The ChatGPT connection also
+supports file and command tools, configured Obsidian/MCP retrieval, and compatible
+runtime integrations. Available tools depend on local configuration and service
+permissions; discovery alone does not verify successful execution.
+
+Completed assistant messages retain their provider and model. Provider-reported
+models are distinguished from runtime selections and unreported requested models;
+older messages retain their original history without invented attribution. A notice
+before sending explains when settings changes will create a fresh runtime thread.
+The affected answer also records that visible history transferred into a new thread.
+
+The app has a separate 1 MiB UTF-8 submission cap. A transfer exceeding it is rejected
+before creating/resuming a runtime thread or replacing its saved link. This byte
+limit is independent of the selected model's token context window. Context-usage
+display and automatic history summarization remain follow-up work.
 
 ## Verification and source layout
 
 ```sh
 ./test.sh
+git diff --check origin/main...HEAD
+git diff --check
 ```
 
 - `Sources/VaydeAOS/`: SwiftUI console, system telemetry, network visualizations,
@@ -203,6 +229,11 @@ remain outside the implemented interface.
 The tests use Swift Testing and require macOS 14 or later. `test.sh` also locates
 its bundled framework when using Command Line Tools without a full Xcode
 installation.
+
+`.gitattributes` exempts only the verbatim upstream
+`Helpers/ChatGPT/vendor/siwc-local/UPSTREAM_THIRD_PARTY_NOTICES.md` from whitespace
+checks. Its legal text is preserved unchanged; all project-owned changes remain
+checked locally and in Apple CI.
 
 The API adapter follows the documented
 [Chat Completions request format](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
