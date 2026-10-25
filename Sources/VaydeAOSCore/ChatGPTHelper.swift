@@ -79,7 +79,6 @@ public actor ChatGPTHelper: ChatGPTHelping {
     private let storageDirectory: URL
     private var process: Process?
     private var input: FileHandle?
-    private var readTask: Task<Void, Never>?
     private var generation = UUID()
     private var buffer = Data()
     private final class Pending {
@@ -102,9 +101,8 @@ public actor ChatGPTHelper: ChatGPTHelping {
     }
 
     deinit {
-        readTask?.cancel()
         try? input?.close()
-        if process?.isRunning == true { process?.terminate() }
+        Self.terminate(process)
         for entry in pending.values { entry.deadline.cancel(); entry.continuation.resume(throwing: ChatGPTHelperError.interrupted) }
     }
 
@@ -153,7 +151,6 @@ public actor ChatGPTHelper: ChatGPTHelping {
         child.standardError = FileHandle.nullDevice
         let current = UUID()
         generation = current
-        child.terminationHandler = { [weak self] _ in Task { await self?.processEnded(current) } }
         do { try child.run() } catch { throw ChatGPTHelperError.unavailable }
         process = child
         input = stdin.fileHandleForWriting
@@ -161,16 +158,27 @@ public actor ChatGPTHelper: ChatGPTHelping {
         try? stdin.fileHandleForReading.close()
         try? stdout.fileHandleForWriting.close()
         let output = stdout.fileHandleForReading
-        readTask = Task.detached { [weak self] in
+        // Pipe reads block while the helper is idle. Keep them off Swift's
+        // cooperative pool so requests, cancellation, and deadlines can progress.
+        DispatchQueue(label: "VaydeAOS.ChatGPT.stdout.\(current)").async { [weak self] in
             defer { try? output.close() }
-            while !Task.isCancelled {
+            while true {
                 // read(upToCount:) can wait for a full buffer on macOS pipes.
                 // availableData returns each currently available protocol chunk.
                 let data = output.availableData
                 if data.isEmpty { break }
-                await self?.receive(data, generation: current)
+                // Acknowledge each chunk before reading the next. Waiting happens
+                // only on this I/O queue; the OS pipe supplies backpressure.
+                let consumed = DispatchSemaphore(value: 0)
+                Task { [weak self] in
+                    defer { consumed.signal() }
+                    await self?.receive(data, generation: current)
+                }
+                consumed.wait()
             }
-            await self?.processEnded(current)
+            // EOF follows the final response bytes. A termination callback could
+            // otherwise fail a request before its completed response is drained.
+            Task { [weak self] in await self?.processEnded(current) }
         }
     }
 
@@ -233,13 +241,20 @@ public actor ChatGPTHelper: ChatGPTHelping {
 
     private func failProcess(error: ChatGPTHelperError = .interrupted) {
         generation = UUID()
-        readTask?.cancel(); readTask = nil
         try? input?.close(); input = nil
-        if process?.isRunning == true { process?.terminate() }
+        Self.terminate(process)
         process = nil
         buffer = Data()
         let old = pending
         pending.removeAll()
         for entry in old.values { entry.deadline.cancel(); entry.continuation.resume(throwing: error) }
+    }
+
+    private nonisolated static func terminate(_ child: Process?) {
+        guard let child, child.isRunning else { return }
+        child.terminate()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+        }
     }
 }

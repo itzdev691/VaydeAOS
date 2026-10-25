@@ -109,6 +109,39 @@ struct ChatGPTTests {
         await helper.shutdown()
     }
 
+    @Test func completedResponseIsDrainedBeforeHelperExit() async throws {
+        let fixture = try ProcessFixture()
+        defer { fixture.remove() }
+        let helper = ChatGPTHelper(helperDirectory: fixture.directory)
+        let response = try await helper.request(ChatGPTHelperRequest(method: "exitAfterResult"))
+        #expect(response.session?.status == "disconnected")
+        await helper.shutdown()
+    }
+
+    @Test func shutdownFailsPendingRequestsAndAllowsRestart() async throws {
+        let fixture = try ProcessFixture()
+        defer { fixture.remove() }
+        let helper = ChatGPTHelper(helperDirectory: fixture.directory)
+        let requests = [ChatGPTHelperRequest(method: "wait"), ChatGPTHelperRequest(method: "wait")]
+        let tasks = requests.map { request in Task { try await helper.request(request) } }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !requests.allSatisfy({ FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent($0.id).path) }) {
+            guard ContinuousClock.now < deadline else {
+                await helper.shutdown()
+                Issue.record("Helper did not receive both requests before shutdown")
+                return
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        await helper.shutdown()
+        for task in tasks {
+            do { _ = try await task.value; Issue.record("Shutdown reported a pending request as successful") }
+            catch { #expect((error as? ChatGPTHelperError)?.code == "helper_stopped") }
+        }
+        #expect(try await helper.request(ChatGPTHelperRequest(method: "state")).session?.status == "disconnected")
+        await helper.shutdown()
+    }
+
     @MainActor private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<500 {
             if condition() { return }
@@ -170,7 +203,10 @@ private struct ProcessFixture {
             if method == 'malformed':
                 print('not JSON', flush=True)
                 continue
-            if method in ('wait', 'cancel'): continue
+            if method == 'wait':
+                with open(request['id'], 'w') as started: started.write('ready')
+                continue
+            if method == 'cancel': continue
             if method == 'stream':
                 for delta in ['A', 'é']:
                     data = (json.dumps({'id': request['id'], 'kind': 'delta', 'delta': delta}, ensure_ascii=False) + '\n').encode('utf8')
@@ -180,6 +216,7 @@ private struct ProcessFixture {
             value = json.dumps({'id': request['id'], 'kind': 'result', 'session': {'status': 'disconnected', 'sharing': False}})
             sys.stdout.write(value[:12]); sys.stdout.flush()
             sys.stdout.write(value[12:] + '\n'); sys.stdout.flush()
+            if method == 'exitAfterResult': sys.exit(0)
         """#
         try script.write(to: directory.appendingPathComponent("helper.mjs"), atomically: true, encoding: .utf8)
     }

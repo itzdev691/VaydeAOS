@@ -470,13 +470,20 @@ final class ChatSessionTests {
     }
 
     private func waitForRequests(_ count: Int, client: ControlledChatClient) async throws {
-        let deadline = Date().addingTimeInterval(2)
-        while await client.requests.count < count {
-            guard Date() < deadline else {
-                Issue.record("Timed out waiting for request \(count)")
+        // Observe the mock's registration directly instead of racing a two-second
+        // polling deadline against unrelated work on the shared main actor.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            defer { group.cancelAll() }
+            group.addTask { try await client.waitForRequests(count) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 10_000_000_000)
                 throw TestFailure.failed
             }
-            try await Task.sleep(nanoseconds: 1_000_000)
+            do { _ = try await group.next() }
+            catch {
+                if error is TestFailure { Issue.record("Timed out waiting for request \(count)") }
+                throw error
+            }
         }
     }
 }
@@ -490,6 +497,24 @@ private actor ControlledChatClient: ChatServing {
 
     private(set) var requests: [Request] = []
     private var continuations: [Int: CheckedContinuation<String, Error>] = [:]
+    private var requestWaiters: [UUID: (count: Int, continuation: CheckedContinuation<Void, Error>)] = [:]
+
+    func waitForRequests(_ count: Int) async throws {
+        try Task.checkCancellation()
+        guard requests.count < count else { return }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                requestWaiters[id] = (count, continuation)
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        requestWaiters.removeValue(forKey: id)?.continuation.resume(throwing: CancellationError())
+    }
 
     func reply(to messages: [ChatMessage], settings: ConnectionSettings, apiKey: String?) async throws -> String {
         let index = requests.count
@@ -497,6 +522,8 @@ private actor ControlledChatClient: ChatServing {
         // Deliberately ignores task cancellation to exercise stale-response protection.
         return try await withCheckedThrowingContinuation { continuation in
             continuations[index] = continuation
+            let ready = requestWaiters.keys.filter { requestWaiters[$0]!.count <= requests.count }
+            for id in ready { requestWaiters.removeValue(forKey: id)?.continuation.resume() }
         }
     }
 
