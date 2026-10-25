@@ -45,7 +45,8 @@ struct ChatGPTConnectionView: View {
             Text("This ChatGPT connection is shared with Codex on this Mac. Signing out disconnects that shared account.")
                 .font(.system(size: 11)).foregroundStyle(Console.muted).fixedSize(horizontal: false, vertical: true)
             Picker("Model", selection: $model) {
-                Text("Use account default").tag("")
+                Text((runtime.models.first(where: \.isDefault) ?? runtime.models.first)
+                    .map { "Account default: \($0.name)" } ?? "Account default (unresolved)").tag("")
                 if !model.isEmpty && !runtime.models.contains(where: { $0.id == model }) {
                     Text(model + " (not in current catalog)").tag(model)
                 }

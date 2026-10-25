@@ -35,7 +35,7 @@ enum CodexValue: Codable, Equatable, Sendable {
 }
 
 public enum CodexRuntimeError: LocalizedError {
-    case unavailable, disconnected, invalidProtocol, timedOut, requestFailed(String), turnFailed, busy, emptyReply, signInRequired, accountReviewRequired
+    case unavailable, disconnected, invalidProtocol, timedOut, requestFailed(String), turnFailed, busy, emptyReply, signInRequired, accountReviewRequired, contextTooLarge
     case processExited(status: Int32, signaled: Bool)
     public var errorDescription: String? {
         switch self {
@@ -50,6 +50,7 @@ public enum CodexRuntimeError: LocalizedError {
         case .emptyReply: return "Codex completed without an assistant reply. Inspect the tool activity before retrying."
         case .signInRequired: return "Connect your ChatGPT account in Connection Settings before sending a message."
         case .accountReviewRequired: return "Confirm the displayed ChatGPT account in Connection Settings after merging the connections."
+        case .contextTooLarge: return "The message or history transfer exceeds the 1 MiB submission limit. The saved conversation and original runtime thread link are preserved. Shorten the message or start a separate chat."
         }
     }
 }

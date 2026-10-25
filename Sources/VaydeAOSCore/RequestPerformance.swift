@@ -5,11 +5,13 @@ public struct ChatReply: Sendable {
     public let content: String
     public let inputTokens: Int?
     public let outputTokens: Int?
+    public let attribution: ResponseAttribution?
 
-    public init(content: String, inputTokens: Int? = nil, outputTokens: Int? = nil) {
+    public init(content: String, inputTokens: Int? = nil, outputTokens: Int? = nil, attribution: ResponseAttribution? = nil) {
         self.content = content
         self.inputTokens = inputTokens.flatMap { $0 >= 0 ? $0 : nil }
         self.outputTokens = outputTokens.flatMap { $0 >= 0 ? $0 : nil }
+        self.attribution = attribution
     }
 }
 

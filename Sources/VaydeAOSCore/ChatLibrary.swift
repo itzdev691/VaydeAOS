@@ -15,6 +15,8 @@ public struct SavedChat: Identifiable, Codable, Equatable, Sendable {
     public var interruptedTurns: [InterruptedTurn] = []
     public var draft = ""
     public var updatedAt = Date()
+    /// Nil only while importing the original shared connection settings.
+    public var configuration: ConnectionSettings?
 
     public var title: String {
         if let name, !name.isEmpty { return name }
@@ -41,7 +43,8 @@ struct ChatLibrary: Codable {
     }
 
     func validated() throws -> Self {
-        guard version == 1, !workspaces.isEmpty,
+        guard (1...2).contains(version), !workspaces.isEmpty,
+              version == 1 || chats.allSatisfy({ $0.configuration != nil }),
               Set(workspaces.map(\.id)).count == workspaces.count,
               Set(chats.map(\.id)).count == chats.count,
               workspaces.contains(where: { $0.id == selectedWorkspaceID }),
@@ -52,5 +55,15 @@ struct ChatLibrary: Codable {
               chats.allSatisfy({ chat in workspaces.contains(where: { $0.id == chat.workspaceID }) })
         else { throw CocoaError(.fileReadCorruptFile) }
         return self
+    }
+
+    /// Seed every legacy chat together, before an edit can change the fallback.
+    func migratingConfigurations(from settings: ConnectionSettings) -> Self {
+        var result = self
+        for index in result.chats.indices where result.chats[index].configuration == nil {
+            result.chats[index].configuration = settings.chatConfiguration
+        }
+        result.version = 2
+        return result
     }
 }

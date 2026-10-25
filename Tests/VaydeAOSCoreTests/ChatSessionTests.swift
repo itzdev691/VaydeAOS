@@ -261,7 +261,8 @@ final class ChatSessionTests {
         #expect(session.errorMessage != nil)
 
         try session.saveSettings(.local, apiKey: "")
-        #expect(try LocalStore(directory: directory).loadSettings() == .local)
+        #expect(try Data(contentsOf: url) == corrupted)
+        #expect(makeSession(client: ControlledChatClient()).settings == .local)
         session.draft = "A prompt"
         #expect(session.canSend)
     }
@@ -278,7 +279,7 @@ final class ChatSessionTests {
         #expect(credentials.savedEndpoint == normalized.baseURL)
         #expect(try session.apiKey(for: settings) == "private-key")
         #expect(credentials.loadedEndpoint == normalized.baseURL)
-        let contents = try String(contentsOf: directory.appendingPathComponent("settings.json"), encoding: .utf8)
+        let contents = try String(contentsOf: directory.appendingPathComponent("chat-library.json"), encoding: .utf8)
         #expect(!(contents.contains("private-key")))
 
         session.draft = "Question"
@@ -358,7 +359,7 @@ final class ChatSessionTests {
         #expect(credentials.loadedEndpoint == nil)
         #expect(credentials.savedEndpoint == nil)
         #expect(session.notice?.contains("until you quit") == true)
-        let saved = try String(contentsOf: directory.appendingPathComponent("settings.json"), encoding: .utf8)
+        let saved = try String(contentsOf: directory.appendingPathComponent("chat-library.json"), encoding: .utf8)
         #expect(!saved.contains("session-secret"))
 
         session.draft = "Question"

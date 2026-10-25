@@ -19,9 +19,6 @@ struct VaydeAOSApp: App {
             .sheet(isPresented: $showingConnectionSettings) {
                 ConnectionSettingsView(session: session)
             }
-            .task {
-                if session.settings.provider == .chatGPT { await session.codex.refresh(settings: session.settings) }
-            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                 session.saveDraft()
                 session.codex.shutdown()

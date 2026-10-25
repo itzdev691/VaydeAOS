@@ -10,11 +10,15 @@ struct ConnectionSettingsView: View {
     @State private var codexModel: String
     @State private var codexWorkspace: String
     @State private var codexAllowsWrites: Bool
+    @State private var reasoningEffort: ConnectionSettings.ReasoningEffort
+    @StateObject private var draftCatalog = APIModelCatalog()
     @State private var apiKey = ""
     @State private var errorMessage: String?
     @State private var credentialEndpoint: String?
     @State private var endpointChanged = false
+    @State private var apiCredentialEdited = false
     @State private var keychainFailed = false
+    @State private var chatID: UUID
     @FocusState private var focusedField: Field?
 
     private let background = Console.background
@@ -30,15 +34,17 @@ struct ConnectionSettingsView: View {
 
     init(session: ChatSession) {
         self.session = session
+        _chatID = State(initialValue: session.selectedChatID)
         _baseURL = State(initialValue: session.settings.baseURL)
         _model = State(initialValue: session.settings.model)
         _provider = State(initialValue: session.settings.provider)
         _codexModel = State(initialValue: session.settings.selectedChatGPTModel)
         _codexWorkspace = State(initialValue: session.settings.codexWorkspace)
         _codexAllowsWrites = State(initialValue: session.settings.codexAllowsWrites)
+        _reasoningEffort = State(initialValue: session.settings.reasoningEffort)
     }
 
-    var body: some View {
+    private var connectionForm: some View {
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
@@ -52,7 +58,7 @@ struct ConnectionSettingsView: View {
                 .padding(.bottom, 13)
                 Text("Connection Settings")
                     .font(.system(size: 23, weight: .medium, design: .monospaced))
-                Text("Choose the provider and model used for this chat.")
+                Text("Provider, model, and reasoning are saved for this chat. Accounts and API keys are shared.")
                     .font(.system(size: 13))
                     .foregroundStyle(muted)
             }
@@ -76,6 +82,8 @@ struct ConnectionSettingsView: View {
             } else {
                 compatibleAPIFields
             }
+
+            reasoningFields
 
             if let errorMessage {
                 Label {
@@ -106,36 +114,46 @@ struct ConnectionSettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-
-            HStack {
-                Button("Use Local Defaults") {
-                    provider = .compatibleAPI
-                    baseURL = ConnectionSettings.local.baseURL
-                    model = ConnectionSettings.local.model
-                }
-                .buttonStyle(ConnectionButtonStyle(accent: accent))
-                .disabled(session.codex.isRunning)
-                .help("Use the local Ollama API and default model")
-                Spacer()
-                Button("Cancel", role: .cancel) {
-                    Task { await session.codex.cancelLogin() }
-                    dismiss()
-                }
-                .buttonStyle(ConnectionButtonStyle(accent: accent))
-                .keyboardShortcut(.cancelAction)
-                Button("Save") {
-                    save()
-                }
-                .buttonStyle(ConnectionButtonStyle(accent: accent, primary: true))
-                .keyboardShortcut(.defaultAction)
-                .disabled(session.codex.isChecking || session.codex.isRunning
-                    || (provider == .chatGPT && session.settings.needsChatGPTAccountReview && !session.codex.isSignedIn)
-                    || (provider == .compatibleAPI
-                    && (baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)))
-            }
         }
         .padding(28)
+    }
+
+    private var actionButtons: some View {
+        HStack {
+            Button("Use Local Defaults") {
+                provider = .compatibleAPI
+                baseURL = ConnectionSettings.local.baseURL
+                model = ConnectionSettings.local.model
+            }
+            .buttonStyle(ConnectionButtonStyle(accent: accent))
+            .disabled(session.codex.isRunning)
+            .help("Use the local Ollama API and default model")
+            Spacer()
+            Button("Cancel", role: .cancel) {
+                Task { await session.codex.cancelLogin() }
+                dismiss()
+            }
+            .buttonStyle(ConnectionButtonStyle(accent: accent))
+            .keyboardShortcut(.cancelAction)
+            Button("Save") {
+                save()
+            }
+            .buttonStyle(ConnectionButtonStyle(accent: accent, primary: true))
+            .keyboardShortcut(.defaultAction)
+            .disabled(session.codex.isChecking || session.codex.isRunning
+                || (provider == .compatibleAPI && draftCatalog.state(for: draftConnection).isLoading) || draftSelection.issue != nil
+                || (provider == .chatGPT && session.settings.needsChatGPTAccountReview && !session.codex.isSignedIn)
+                || (provider == .compatibleAPI
+                && (baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)))
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView { connectionForm }.frame(maxHeight: 640)
+            actionButtons.padding(.horizontal, 28).padding(.vertical, 18)
+        }
         .frame(width: 560)
         .foregroundStyle(Console.text)
         .background(background)
@@ -145,10 +163,12 @@ struct ConnectionSettingsView: View {
         .onAppear {
             if provider == .compatibleAPI { refreshCredentialForEndpoint() }
         }
+        .onChange(of: session.selectedChatID) { _ in dismiss() }
         .onChange(of: provider) { value in
             errorMessage = nil
             if value == .compatibleAPI { refreshCredentialForEndpoint() }
         }
+        .onChange(of: apiKey) { _ in draftCatalog.invalidate(draftConnection) }
         .onChange(of: baseURL) { _ in
             apiKey = ""
             credentialEndpoint = nil
@@ -182,11 +202,24 @@ struct ConnectionSettingsView: View {
             }
 
             field("Model") {
+                HStack {
+                    if let models = draftAPIState.models {
+                        Picker("Available models", selection: $model) {
+                            if !models.contains(where: { $0.id == model }) { Text(model.isEmpty ? "Choose a model" : model + " (not in catalog)").tag(model) }
+                            ForEach(models) { Text($0.name).tag($0.id) }
+                        }.labelsHidden().accessibilityLabel("Available API models")
+                    }
+                    Button(draftAPIState.isLoading ? "Discovering…" : "Discover models") {
+                        Task { await draftCatalog.refresh(settings: draftConnection, apiKey: apiKey, force: true) }
+                    }
+                    .buttonStyle(ConnectionButtonStyle(accent: accent))
+                    .disabled(draftAPIState.isLoading || (try? draftConnection.validated()) == nil)
+                }
                 TextField("Model name", text: $model)
                     .focused($focusedField, equals: .model)
                     .accessibilityLabel("Model name")
                     .modifier(ConnectionInputStyle(accent: accent, panel: panel, focused: focusedField == .model))
-                Text("Enter the exact model identifier expected by the API.")
+                Text("Discover models from this endpoint or enter an exact identifier when discovery is unavailable. No message is sent.")
                     .font(.system(size: 11))
                     .foregroundStyle(muted)
             }
@@ -207,6 +240,47 @@ struct ConnectionSettingsView: View {
         .textFieldStyle(.plain)
     }
 
+    private var draftConnection: ConnectionSettings {
+        ConnectionSettings(baseURL: baseURL, model: model.isEmpty ? "discovery" : model,
+            reasoningEffort: reasoningEffort)
+    }
+
+    private var draftSelection: ModelSelection {
+        var connection = draftConnection
+        connection.model = model
+        connection.provider = provider
+        connection.chatGPTModel = codexModel.isEmpty ? nil : codexModel
+        connection.codexModel = codexModel
+        let state = draftAPIState
+        return ModelSelection(settings: connection,
+            models: provider == .chatGPT ? session.codex.modelOptions : state.models,
+            catalogError: provider == .chatGPT ? session.codex.modelCatalogError : state.error)
+    }
+
+    private var draftAPIState: APIModelCatalog.State {
+        let local = draftCatalog.state(for: draftConnection)
+        if local.models != nil || local.error != nil || local.isLoading { return local }
+        if !endpointChanged && !apiCredentialEdited {
+            return session.apiModels.state(for: draftConnection)
+        }
+        return local
+    }
+
+    private var reasoningFields: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Picker("Reasoning for this chat", selection: $reasoningEffort) {
+                if !draftSelection.availableEfforts.contains(reasoningEffort) {
+                    Text(reasoningEffort.label + (draftSelection.resolvedModel?.reasoningEfforts == nil ? " (unverified)" : " (unsupported)"))
+                        .tag(reasoningEffort)
+                }
+                ForEach(draftSelection.availableEfforts, id: \.self) { Text($0.label).tag($0) }
+            }
+            Text(draftSelection.issue ?? draftSelection.hint)
+                .font(.system(size: 11)).foregroundStyle(draftSelection.issue == nil ? muted : Console.amber)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title)
@@ -222,6 +296,7 @@ struct ConnectionSettingsView: View {
         Binding(
             get: { apiKey },
             set: { value in
+                apiCredentialEdited = true
                 apiKey = value
                 credentialEndpoint = try? ConnectionSettings(
                     baseURL: baseURL,
@@ -263,11 +338,16 @@ struct ConnectionSettingsView: View {
 
     private func save(rememberAPIKey: Bool = true) {
         do {
+            guard session.selectedChatID == chatID else {
+                errorMessage = "The selected chat changed. Reopen Connection Settings for the current chat."
+                return
+            }
             var settings = try ConnectionSettings(baseURL: baseURL, model: model,
                 provider: provider, chatGPTModel: codexModel.isEmpty ? nil : codexModel,
-                reasoningEffort: session.settings.reasoningEffort, codexModel: codexModel,
+                reasoningEffort: reasoningEffort, codexModel: codexModel,
                 codexWorkspace: codexWorkspace, codexAllowsWrites: codexAllowsWrites).validated()
             settings.needsChatGPTAccountReview = session.settings.needsChatGPTAccountReview
+            if let issue = draftSelection.issue { throw ModelSelectionError(issue) }
             if rememberAPIKey && provider == .compatibleAPI {
                 try loadCredentialIfNeeded(for: settings)
             }

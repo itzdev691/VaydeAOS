@@ -12,6 +12,65 @@ final class ChatClientTests {
         StubURLProtocol.configure(handler: nil)
     }
 
+    @Test func modelDiscoveryUsesAuthenticatedGETAndPreservesUnknownCapabilities() async throws {
+        _ = makeClient { request in
+            #expect(request.httpMethod == "GET")
+            #expect(request.url?.absoluteString == "https://api.example.com/v1/models")
+            #expect(request.httpBody == nil)
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer discovery-key")
+            #expect(!request.httpShouldHandleCookies)
+            return .response(200, Data(#"{"data":[{"id":"manual"},{"id":"reasoner","display_name":"Reasoner","supported_reasoning_efforts":["low","adaptive"],"default_reasoning_effort":"low"},{"id":"manual"}]}"#.utf8))
+        }
+        let catalog = ModelCatalogClient(session: try #require(sessions.last))
+        let models = try await catalog.models(settings: ConnectionSettings(baseURL: "HTTPS://API.EXAMPLE.COM:443/v1/", model: ""), apiKey: " discovery-key\n")
+        #expect(models.map(\.id) == ["manual", "reasoner"])
+        #expect(models[0].reasoningEfforts == nil)
+        #expect(models[1].reasoningEfforts?.map(\.rawValue) == ["low", "adaptive"])
+        #expect(models[1].defaultEffort == .low)
+    }
+
+    @Test func answerAttributionUsesReportedModelAndLabelsUnreportedRequests() async throws {
+        let client = makeClient { _ in
+            .response(200, Data(#"{"model":"actual-snapshot","choices":[{"message":{"content":"Answer"}}]}"#.utf8))
+        }
+        let reply = try await client.measuredReply(to: [], settings: .local, apiKey: nil)
+        #expect(reply.attribution?.model == "actual-snapshot")
+        #expect(reply.attribution?.source == .reported)
+        let unreported = makeClient { _ in .response(200, Self.replyData("Answer")) }
+        let fallback = try await unreported.measuredReply(to: [], settings: .local, apiKey: nil)
+        #expect(fallback.attribution?.model == ConnectionSettings.local.model)
+        #expect(fallback.attribution?.source == .requested)
+    }
+
+    @Test func modelDiscoveryPaginatesWithoutFollowingProviderURLs() async throws {
+        _ = makeClient { request in
+            if request.url?.query == nil {
+                return .response(200, Data(#"{"data":[{"id":"first"}],"has_more":true,"last_id":"cursor"}"#.utf8))
+            }
+            #expect(request.url?.absoluteString == "http://127.0.0.1:11434/v1/models?after=cursor")
+            return .response(200, Data(#"{"data":[{"id":"second"}],"has_more":false}"#.utf8))
+        }
+        let models = try await ModelCatalogClient(session: try #require(sessions.last)).models(settings: .local, apiKey: nil)
+        #expect(models.map(\.id) == ["first", "second"])
+    }
+
+    @Test func modelDiscoveryRejectsRedirectsAndSanitizesProviderFailures() async throws {
+        for redirect in [false, true] {
+            _ = makeClient { request in
+                #expect(request.url?.host == "127.0.0.1")
+                return redirect ? .redirect(URL(string: "https://other.example/models")!)
+                    : .response(401, Data("private-provider-content".utf8))
+            }
+            do {
+                _ = try await ModelCatalogClient(session: try #require(sessions.last)).models(settings: .local, apiKey: "secret")
+                Issue.record("Expected discovery to reject the response")
+            } catch {
+                #expect(!error.localizedDescription.contains("private-provider-content"))
+                #expect(!error.localizedDescription.contains("secret"))
+            }
+        }
+    }
+
     @Test func testRequestContainsOnlyModelConversationAndStreamFlag() async throws {
         let history = [
             ChatMessage(role: .user, content: "First question"),

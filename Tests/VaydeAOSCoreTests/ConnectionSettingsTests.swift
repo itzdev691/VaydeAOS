@@ -74,6 +74,17 @@ struct ConnectionSettingsTests {
         #expect(try JSONDecoder().decode(ChatMessage.self, from: data) == message)
     }
 
+    @Test func legacyMessagesKeepUnknownAttributionAndNewMessagesRoundTripIt() throws {
+        let original = ChatMessage(role: .assistant, content: "Old response")
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        object.removeValue(forKey: "attribution")
+        let legacy = try JSONDecoder().decode(ChatMessage.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(legacy.attribution == nil)
+        let attributed = ChatMessage(role: .assistant, content: "New response",
+            attribution: ResponseAttribution(provider: .chatGPT, model: "resolved-model", source: .reported, startedNewThread: true))
+        #expect(try JSONDecoder().decode(ChatMessage.self, from: JSONEncoder().encode(attributed)) == attributed)
+    }
+
     private func assertValidationError(
         _ expected: ConnectionSettingsError,
         baseURL: String,

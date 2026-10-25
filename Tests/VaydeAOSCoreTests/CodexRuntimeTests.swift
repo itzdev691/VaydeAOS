@@ -414,7 +414,11 @@ final class CodexRuntimeTests {
         session.send(); await session.sendTask?.value
         #expect(session.messages.last?.content == "Final café")
         #expect(try Data(contentsOf: legacyFile) == preserved)
-        #expect(try store.loadSettings()?.needsChatGPTAccountReview == false)
+        #expect(try store.load(ChatLibrary.self, from: "chat-library.json")?.chats.first {
+            $0.id == session.selectedChatID
+        }?.configuration?.needsChatGPTAccountReview == false)
+        let relaunched = ChatSession(store: store, credentials: NoAPICredentials())
+        #expect(!relaunched.settings.needsChatGPTAccountReview)
         runtime.shutdown()
     }
 
@@ -447,26 +451,163 @@ final class CodexRuntimeTests {
         defer { runtime.shutdown() }
         let store = LocalStore(directory: directory)
         let session = ChatSession(store: store, codex: runtime)
-        try session.saveSettings(configuration(), apiKey: "")
+        var firstSettings = configuration()
+        firstSettings.chatGPTModel = "fixture-model"
+        try session.saveSettings(firstSettings, apiKey: "")
         let first = session.selectedChatID
         session.draft = "First context"; session.send(); await session.sendTask?.value
         #expect(runtime.threadID == "thread-1")
         session.newChat()
         #expect(runtime.threadID == nil)
+        var secondSettings = session.settings
+        secondSettings.chatGPTModel = "other-fixture-model"
+        secondSettings.reasoningEffort = .high
+        try session.saveSettings(secondSettings, apiKey: "")
         session.draft = "Second context"; session.send(); await session.sendTask?.value
         #expect(runtime.threadID == "thread-2")
         session.selectChat(first)
         #expect(runtime.threadID == "thread-1")
+        #expect(session.settings.selectedChatGPTModel == "fixture-model")
+        #expect(session.settings.reasoningEffort == .automatic)
         session.draft = "First follow-up"; session.send(); await session.sendTask?.value
         let calls = try requests()
         #expect(calls.filter { $0["method"].text == "thread/start" }.count == 2)
         let resumed = try #require(calls.last { $0["method"].text == "thread/resume" })
         #expect(resumed["params"]["threadId"].text == "thread-1")
+        #expect(resumed["params"]["model"].text == "fixture-model")
         #expect(session.messages.map(\.content) == ["First context", "Final café", "First follow-up", "Final café"])
         let restoredRuntime = try makeRuntime()
         defer { restoredRuntime.shutdown() }
         let restored = ChatSession(store: store, codex: restoredRuntime)
         #expect(restored.codex.threadID == "thread-1")
+    }
+
+    @Test(arguments: ["missing", "effort"])
+    func unavailableModelsAndUnsupportedEffortNeverStartThreadsOrTurns(mode: String) async throws {
+        let runtime = try makeRuntime()
+        defer { runtime.shutdown() }
+        var settings = configuration()
+        settings.chatGPTModel = mode == "missing" ? "unavailable-model" : "fixture-model"
+        settings.reasoningEffort = mode == "effort" ? .max : .automatic
+        do {
+            _ = try await runtime.reply(to: [ChatMessage(role: .user, content: "Do not execute")], settings: settings) { _ in }
+            Issue.record("Expected capability validation to fail")
+        } catch { #expect(error is ModelSelectionError) }
+        let calls = try requests()
+        #expect(calls.contains { $0["method"].text == "model/list" })
+        #expect(!calls.contains { ["thread/start", "thread/resume", "turn/start"].contains($0["method"].text ?? "") })
+        #expect(runtime.modelOptions?.first?.reasoningEfforts == [.low, .medium, .high])
+        #expect(runtime.modelOptions?.first?.defaultEffort == .medium)
+    }
+
+    @Test(arguments: [false, true])
+    func oversizedTransfersPreserveTheOriginalThreadAndAudit(switchModel: Bool) async throws {
+        let runtime = try makeRuntime(mode: "multipleThreads")
+        defer { runtime.shutdown() }
+        let first = ChatMessage(role: .user, content: "Initial message")
+        let reply = try await runtime.reply(to: [first], settings: configuration()) { _ in }
+        let originalThread = runtime.threadID
+        let audit = directory.appendingPathComponent("codex-session.json")
+        let before = try Data(contentsOf: audit)
+        var settings = configuration()
+        if switchModel { settings.chatGPTModel = "other-fixture-model" }
+        let oversized = String(repeating: "x", count: 1024 * 1024 + 1)
+        let history = [first, ChatMessage(role: .assistant, content: switchModel ? oversized : reply.content),
+                       ChatMessage(role: .user, content: switchModel ? "Next" : oversized)]
+        do {
+            _ = try await runtime.reply(to: history, settings: settings) { _ in }
+            Issue.record("Expected an oversized-context error")
+        } catch CodexRuntimeError.contextTooLarge { }
+        catch { Issue.record("Unexpected rejection: \(error.localizedDescription)") }
+        #expect(runtime.threadID == originalThread)
+        #expect(try Data(contentsOf: audit) == before)
+        let calls = try requests()
+        #expect(calls.filter { $0["method"].text == "thread/start" }.count == 1)
+        #expect(calls.filter { $0["method"].text == "turn/start" }.count == 1)
+        #expect(!calls.contains { $0["method"].text == "thread/resume" })
+        _ = try await runtime.reply(to: [first, ChatMessage(role: .assistant, content: reply.content),
+                                        ChatMessage(role: .user, content: "Short follow-up")], settings: configuration()) { _ in }
+        #expect(runtime.threadID == originalThread)
+    }
+
+    @Test func changedModelsDiscloseContextTransferAndRetainAnswerAttribution() async throws {
+        let runtime = try makeRuntime(mode: "multipleThreads")
+        defer { runtime.shutdown() }
+        let session = ChatSession(store: LocalStore(directory: directory), codex: runtime)
+        var settings = configuration(); settings.chatGPTModel = "fixture-model"
+        try session.saveSettings(settings, apiKey: "")
+        session.draft = "First"; session.send(); await session.sendTask?.value
+        #expect(session.contextTransitionNotice == nil)
+        #expect(session.messages.last?.attribution?.model == "fixture-model")
+        try session.selectModel("other-fixture-model")
+        #expect(session.contextTransitionNotice?.contains("fresh runtime thread") == true)
+        session.draft = "Second"; session.send(); await session.sendTask?.value
+        #expect(session.messages.last?.attribution?.model == "other-fixture-model")
+        #expect(session.messages.last?.attribution?.startedNewThread == true)
+        #expect(session.contextTransitionNotice == nil)
+        let restored = ChatSession(store: LocalStore(directory: directory))
+        #expect(restored.messages.compactMap(\.attribution).map(\.model) == ["fixture-model", "other-fixture-model"])
+        #expect(restored.messages.last?.attribution?.startedNewThread == true)
+    }
+
+    @Test func runtimeReportedModelWinsOverRequestedModelAndSurvivesConnectedTurns() async throws {
+        let runtime = try makeRuntime(mode: "reportedModel")
+        defer { runtime.shutdown() }
+        let user = ChatMessage(role: .user, content: "First")
+        let reply = try await runtime.reply(to: [user], settings: configuration()) { _ in }
+        #expect(reply.attribution?.model == "reported-snapshot")
+        #expect(reply.attribution?.source == .reported)
+        let next = try await runtime.reply(to: [user, ChatMessage(role: .assistant, content: reply.content),
+            ChatMessage(role: .user, content: "Next")], settings: configuration()) { _ in }
+        #expect(next.attribution?.model == "reported-snapshot")
+        #expect(next.attribution?.source == .reported)
+    }
+
+    @Test func bundledModelSwitchAcceptanceWhenExplicitlyEnabled() async throws {
+        guard let path = ProcessInfo.processInfo.environment["VAYDEAOS_CODEX_SMOKE"],
+              ProcessInfo.processInfo.environment["VAYDEAOS_CODEX_ACCEPTANCE"] == "1" else { return }
+        let store = LocalStore(directory: directory)
+        let runtime = CodexRuntime(process: CodexProcess(executable: URL(fileURLWithPath: path)), store: store)
+        defer { runtime.shutdown() }
+        await runtime.refresh(settings: configuration())
+        let firstModel = try #require(runtime.models.first(where: \.isDefault) ?? runtime.models.first)
+        let secondModel = try #require(runtime.models.first { $0.id != firstModel.id && $0.id.contains("luna") }
+                                      ?? runtime.models.first { $0.id != firstModel.id })
+        let session = ChatSession(store: store, credentials: NoAPICredentials(), codex: runtime)
+        var settings = configuration(); settings.chatGPTModel = firstModel.id
+        try session.saveSettings(settings, apiKey: "")
+        session.draft = "This is an isolated application acceptance check. Reply with exactly VAYDEAOS_ACCEPT_A_42. Do not use tools, read files, access other services, or delegate."
+        session.send(); try await waitForAcceptance(session)
+        try #require(session.errorMessage == nil)
+        try #require(session.messages.last?.content.trimmingCharacters(in: .whitespacesAndNewlines) == "VAYDEAOS_ACCEPT_A_42")
+        let originalThread = try #require(runtime.threadID)
+        try session.selectModel(secondModel.id)
+        #expect(session.contextTransitionNotice != nil)
+        session.draft = "Repeat the first acceptance marker from earlier, followed by |VAYDEAOS_ACCEPT_B_42. Output only those two markers. Do not use tools, read files, access other services, or delegate."
+        session.send(); try await waitForAcceptance(session)
+        try #require(session.errorMessage == nil)
+        try #require(session.messages.last?.content.trimmingCharacters(in: .whitespacesAndNewlines) == "VAYDEAOS_ACCEPT_A_42|VAYDEAOS_ACCEPT_B_42")
+        let secondThread = try #require(runtime.threadID)
+        #expect(secondThread != originalThread)
+        #expect(session.messages.last?.attribution?.startedNewThread == true)
+        #expect(session.messages.compactMap(\.attribution).map(\.model) == [firstModel.id, secondModel.id])
+        #expect(session.messages.compactMap(\.attribution).allSatisfy { $0.source == .reported })
+        #expect(runtime.activity.isEmpty)
+        let history = session.messages
+        runtime.shutdown()
+        let nextRuntime = CodexRuntime(process: CodexProcess(executable: URL(fileURLWithPath: path)), store: store)
+        defer { nextRuntime.shutdown() }
+        let relaunched = ChatSession(store: store, credentials: NoAPICredentials(), codex: nextRuntime)
+        #expect(relaunched.messages == history)
+        #expect(relaunched.settings.selectedChatGPTModel == secondModel.id)
+        relaunched.draft = "Repeat the two acceptance markers from earlier, separated by |. Output only the markers. Do not use tools, read files, access other services, or delegate."
+        relaunched.send(); try await waitForAcceptance(relaunched)
+        #expect(relaunched.errorMessage == nil)
+        #expect(relaunched.messages.last?.content.trimmingCharacters(in: .whitespacesAndNewlines) == "VAYDEAOS_ACCEPT_A_42|VAYDEAOS_ACCEPT_B_42")
+        #expect(nextRuntime.threadID == secondThread)
+        #expect(nextRuntime.activity.isEmpty)
+        #expect(relaunched.messages.last?.attribution?.startedNewThread == false)
+        print("Live acceptance: \(firstModel.id) -> \(secondModel.id) -> runtime/session relaunch and original-thread continuation verified; no tools executed.")
     }
 
     @Test(arguments: ["appDiscoveryFailure", "mcpDiscoveryFailure"])
@@ -549,6 +690,17 @@ final class CodexRuntimeTests {
     private func configuration() -> ConnectionSettings {
         ConnectionSettings(baseURL: "", model: "", provider: .codex, codexWorkspace: directory.path)
     }
+    private func waitForAcceptance(_ session: ChatSession) async throws {
+        let deadline = Date().addingTimeInterval(120)
+        while session.isSending {
+            if !session.codex.prompts.isEmpty || Date() >= deadline {
+                session.stop()
+                throw CodexRuntimeError.requestFailed("bounded live acceptance without tool permissions")
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        await session.sendTask?.value
+    }
     private func waitForLiveTurn(runtime: CodexRuntime) async throws {
         let deadline = Date().addingTimeInterval(120)
         var started = false
@@ -627,7 +779,9 @@ for line in sys.stdin:
     thread_count+=1
     thread='thread-'+str(thread_count)
    else:thread=params['threadId']
-  out({'id':rid,'result':{'thread':{'id':thread}}})
+  result={'thread':{'id':thread}}
+  if mode=='reportedModel':result['model']='reported-snapshot'
+  out({'id':rid,'result':result})
  elif method=='turn/start':
   turn+=1
   if mode=='pendingAck':continue
@@ -681,7 +835,7 @@ for line in sys.stdin:
   else:complete()
  elif method=='turn/interrupt':out({'id':rid,'result':{}})
  elif method=='account/read':out({'id':rid,'result':{'account':None if mode=='signedOut' else {'type':'chatgpt','email':'fixture@example.test','planType':'plus'}}})
- elif method=='model/list':out({'id':rid,'result':{'data':[{'id':'fixture-model','model':'fixture-model','displayName':'Fixture model','isDefault':True}]}})
+ elif method=='model/list':out({'id':rid,'result':{'data':[{'id':name,'model':name,'displayName':'Fixture model' if name=='fixture-model' else name,'isDefault':name=='fixture-model','supportedReasoningEfforts':[{'reasoningEffort':effort} for effort in ['low','medium','high']],'defaultReasoningEffort':'medium'} for name in ['fixture-model','other-fixture-model','legacy-model']]}})
  elif method=='mcpServerStatus/list':
   mcp_reads+=1
   if mode=='mcpDiscoveryFailure' and mcp_reads==1:out({'id':rid,'error':{'code':-32603,'message':'fixture unavailable'}})

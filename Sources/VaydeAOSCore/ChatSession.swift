@@ -33,9 +33,13 @@ public final class ChatSession: ObservableObject {
     private let store: LocalStore
     private let credentials: any CredentialStoring
     public let codex: CodexRuntime
+    public let apiModels: APIModelCatalog
     private var runtimeChanges: AnyCancellable?
+    private var catalogChanges: AnyCancellable?
+    @Published public private(set) var modelCatalogRevision = 0
     private var activeRequest: ActiveRequest?
     private var settingsLoadIssue: String?
+    private var configurationLoadIssue: String?
     private var messagesLoadIssue: String?
     private var recoveryLoadIssue: String?
     // Never serialized. An empty value explicitly overrides a saved key.
@@ -45,13 +49,15 @@ public final class ChatSession: ObservableObject {
         let id: UUID
         let originalDraft: String
         let message: ChatMessage
+        let configuration: ConnectionSettings
     }
 
     public init(
         client: any ChatServing = ChatClient(),
         store: LocalStore = LocalStore(),
         credentials: any CredentialStoring = KeychainCredentialStore(),
-        codex: CodexRuntime? = nil
+        codex: CodexRuntime? = nil,
+        apiModels: APIModelCatalog? = nil
     ) {
         let initialLibrary = ChatLibrary(directory: "")
         library = initialLibrary
@@ -61,22 +67,27 @@ public final class ChatSession: ObservableObject {
         self.store = store
         self.credentials = credentials
         self.codex = codex ?? CodexRuntime(store: store)
+        self.apiModels = apiModels ?? APIModelCatalog()
 
         do {
             if let saved = try store.loadSettings() {
                 settings = try saved.validated()
             }
         } catch {
-            settingsLoadIssue = "Could not load saved settings: \(error.localizedDescription) Open Connection and save your settings to replace the existing file."
+            settingsLoadIssue = "Could not load saved settings: \(error.localizedDescription) Open Connection and save this chat's settings to recover; the original file will be preserved."
         }
 
         do {
             if let saved = try store.load(ChatLibrary.self, from: "chat-library.json") {
                 library = try saved.validated()
+                // Version 2 owns all chat settings; the old defaults file is no longer authoritative.
+                if library.version == 2 { settingsLoadIssue = nil }
+                if settingsLoadIssue == nil { library = library.migratingConfigurations(from: settings) }
                 selectedWorkspaceID = library.selectedWorkspaceID
                 let workspace = library.workspaces.first { $0.id == selectedWorkspaceID }!
                 selectedChatID = workspace.selectedChatID
                 let chat = library.chats.first { $0.id == selectedChatID }!
+                settings = chat.configuration ?? settings
                 messages = chat.messages
                 interruptedTurns = chat.interruptedTurns
                 draft = chat.draft
@@ -106,6 +117,10 @@ public final class ChatSession: ObservableObject {
         } catch {
             libraryLoadIssue = "Could not load the chat library: \(error.localizedDescription) The saved files have been preserved."
         }
+        if libraryLoadIssue == nil, settingsLoadIssue == nil {
+            library = library.migratingConfigurations(from: settings)
+        }
+        validateCurrentConfiguration()
         snapshotCurrentChat()
         publishLibrary()
         libraryReady = true
@@ -114,10 +129,58 @@ public final class ChatSession: ObservableObject {
             notice = "The ChatGPT connections were merged. Confirm the displayed account in Connection Settings before sending."
         }
         runtimeChanges = self.codex.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        catalogChanges = self.apiModels.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+    }
+
+    public var contextTransitionNotice: String? {
+        var connection = settings
+        if connection.codexWorkspace.isEmpty {
+            connection.codexWorkspace = store.directory.appendingPathComponent("Workspaces/\(selectedWorkspaceID.uuidString)", isDirectory: true).path
+        }
+        connection.codexWorkspace = URL(fileURLWithPath: connection.codexWorkspace).resolvingSymlinksInPath().path
+        return codex.contextTransitionNotice(messages: messages, settings: connection)
+    }
+
+    public var modelSelection: ModelSelection {
+        if settings.provider == .chatGPT {
+            return ModelSelection(settings: settings, models: codex.modelOptions, catalogError: codex.modelCatalogError)
+        }
+        let state = apiModels.state(for: settings)
+        return ModelSelection(settings: settings, models: state.models, catalogError: state.error)
+    }
+    public var isDiscoveringModels: Bool {
+        settings.provider == .chatGPT ? codex.isChecking : apiModels.state(for: settings).isLoading
+    }
+    public var modelCatalogIdentity: String {
+        "\(settings.provider.rawValue)\n\(settings.baseURL)\n\(modelCatalogRevision)"
+    }
+    public func refreshModels(force: Bool = false) async {
+        guard !isSending else { return }
+        let connection = settings
+        if connection.provider == .chatGPT {
+            if force || !codex.hasLoadedModels { await codex.refresh(settings: connection) }
+        } else {
+            var credentialScope = connection
+            credentialScope.model = "discovery"
+            do { await apiModels.refresh(settings: connection, apiKey: try apiKey(for: credentialScope), force: force) }
+            catch { apiModels.reportError("Could not read this endpoint's API key. Open Connection Settings or use a session key.", for: connection) }
+        }
+    }
+
+    public func selectModel(_ id: String) throws {
+        guard canOrganizeChats, !isDiscoveringModels else { throw SessionError.requestInProgress }
+        var connection = settings
+        if connection.provider == .chatGPT { connection.chatGPTModel = id.isEmpty ? nil : id; connection.codexModel = id }
+        else { connection.model = id }
+        connection = try connection.validated()
+        if let models = modelSelection.models,
+           let issue = ModelSelection(settings: connection, models: models).modelIssue { throw ModelSelectionError(issue) }
+        try persistConfiguration(connection)
     }
 
     public var canSend: Bool {
         !isSending && activeRequest == nil && loadIssues == nil
+            && !isDiscoveringModels && modelSelection.issue == nil
             && (settings.provider != .chatGPT || (!codex.isRunning && !codex.isChecking
                 && !settings.needsChatGPTAccountReview && (!codex.hasCheckedAccount || codex.isSignedIn)))
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -141,7 +204,8 @@ public final class ChatSession: ObservableObject {
             request = ActiveRequest(
                 id: UUID(),
                 originalDraft: draft,
-                message: ChatMessage(role: .user, content: draft.trimmingCharacters(in: .whitespacesAndNewlines))
+                message: ChatMessage(role: .user, content: draft.trimmingCharacters(in: .whitespacesAndNewlines)),
+                configuration: connection
             )
         } catch {
             errorMessage = "Could not send message: \(error.localizedDescription)"
@@ -222,7 +286,8 @@ public final class ChatSession: ObservableObject {
         guard libraryLoadIssue == nil, !codex.isRunning, !codex.isChecking else { return }
         if isSending { stop() }
         guard saveLibrary(allowRecovery: true) else { return }
-        let chat = SavedChat(id: UUID(), workspaceID: selectedWorkspaceID)
+        let chat = SavedChat(id: UUID(), workspaceID: selectedWorkspaceID,
+                             configuration: settingsLoadIssue == nil ? settings.chatConfiguration : nil)
         var next = library
         next.chats.append(chat)
         next.workspaces[next.workspaces.firstIndex { $0.id == selectedWorkspaceID }!].selectedChatID = chat.id
@@ -250,7 +315,8 @@ public final class ChatSession: ObservableObject {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canOrganizeChats, !name.isEmpty, saveLibrary(allowRecovery: true) else { return }
         let id = UUID()
-        let chat = SavedChat(id: UUID(), workspaceID: id)
+        let chat = SavedChat(id: UUID(), workspaceID: id,
+                             configuration: settingsLoadIssue == nil ? settings.chatConfiguration : nil)
         var next = library
         next.workspaces.append(ChatWorkspace(id: id, name: name, directory: "", selectedChatID: chat.id))
         next.chats.append(chat)
@@ -281,7 +347,8 @@ public final class ChatSession: ObservableObject {
             let replacement: SavedChat
             if let existing = next.chats.first(where: { $0.workspaceID == selectedWorkspaceID }) { replacement = existing }
             else {
-                replacement = SavedChat(id: UUID(), workspaceID: selectedWorkspaceID)
+                replacement = SavedChat(id: UUID(), workspaceID: selectedWorkspaceID,
+                                        configuration: settingsLoadIssue == nil ? settings.chatConfiguration : nil)
                 next.chats.append(replacement)
             }
             next.workspaces[next.workspaces.firstIndex { $0.id == selectedWorkspaceID }!].selectedChatID = replacement.id
@@ -345,10 +412,12 @@ public final class ChatSession: ObservableObject {
             draft = chat.draft
             messages = chat.messages
             interruptedTurns = chat.interruptedTurns
+            settings = chat.configuration ?? settings
             settings.codexWorkspace = next.workspaces.first { $0.id == selectedWorkspaceID }!.directory
+            validateCurrentConfiguration()
             messagesLoadIssue = nil
             recoveryLoadIssue = nil
-            errorMessage = settingsLoadIssue
+            errorMessage = loadIssues
             notice = interruptedTurns.isEmpty ? nil
                 : "Saved partial responses are incomplete; completed tool actions may remain."
             performanceHistory = []
@@ -376,16 +445,17 @@ public final class ChatSession: ObservableObject {
 
     public func setReasoningEffort(_ effort: ConnectionSettings.ReasoningEffort) throws {
         guard !isSending, !codex.isRunning, !codex.isChecking else { throw SessionError.requestInProgress }
-        // Preserve an unreadable settings file until Connection Settings repairs it.
-        guard settingsLoadIssue == nil else {
+        // Explicit connection settings repair unreadable configuration; the slider cannot.
+        guard settingsLoadIssue == nil, configurationLoadIssue == nil else {
             throw CocoaError(.fileReadCorruptFile)
         }
         guard effort != settings.reasoningEffort else { return }
         var connection = settings
         connection.reasoningEffort = effort
-        try store.saveSettings(connection)
-        settings = connection
-        performanceHistory = []
+        if let issue = ModelSelection(settings: connection, models: modelSelection.models).issue {
+            throw ModelSelectionError(issue)
+        }
+        try persistConfiguration(connection)
     }
 
     public func saveSettings(
@@ -401,12 +471,7 @@ public final class ChatSession: ObservableObject {
                 guard codex.isSignedIn else { throw CodexRuntimeError.signInRequired }
                 connection.needsChatGPTAccountReview = false
             }
-            try store.saveSettings(connection)
-            if self.settings != connection { performanceHistory = [] }
-            self.settings = connection
-            try updateWorkspaceDirectory(connection.codexWorkspace)
-            settingsLoadIssue = nil
-            errorMessage = loadIssues
+            try persistConfiguration(connection)
             notice = "ChatGPT connection saved. Agent tools use the bundled runtime."
             return
         }
@@ -414,40 +479,64 @@ public final class ChatSession: ObservableObject {
         if rememberAPIKey {
             try credentials.save(key, for: connection.baseURL)
         }
-        try store.saveSettings(connection)
+        try persistConfiguration(connection)
         if rememberAPIKey {
             sessionAPIKeys.removeValue(forKey: connection.baseURL)
         } else {
             sessionAPIKeys[connection.baseURL] = key
         }
-        if self.settings != connection { performanceHistory = [] }
-        self.settings = connection
-        try updateWorkspaceDirectory(connection.codexWorkspace)
-        settingsLoadIssue = nil
-        errorMessage = loadIssues
+        apiModels.invalidate(connection)
+        modelCatalogRevision += 1
         notice = rememberAPIKey
             ? "Settings saved."
             : "Settings saved. The API key is held only until you quit this app; existing Keychain entries are unchanged."
     }
 
-    private func updateWorkspaceDirectory(_ directory: String) throws {
-        guard let index = library.workspaces.firstIndex(where: { $0.id == selectedWorkspaceID }) else { return }
-        library.workspaces[index].directory = directory
+    /// Configuration and folder changes commit in the same atomic write as the transcript.
+    /// Publish only after that write succeeds; settings.json remains an untouched migration source.
+    private func persistConfiguration(_ connection: ConnectionSettings) throws {
+        guard libraryLoadIssue == nil, messagesLoadIssue == nil, recoveryLoadIssue == nil else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        var next = library.migratingConfigurations(from: connection)
+        let chatIndex = next.chats.firstIndex { $0.id == selectedChatID }!
+        let workspaceIndex = next.workspaces.firstIndex { $0.id == selectedWorkspaceID }!
+        next.chats[chatIndex].messages = messages
+        next.chats[chatIndex].draft = draft
+        next.chats[chatIndex].interruptedTurns = interruptedTurns
+        next.chats[chatIndex].configuration = connection.chatConfiguration
+        next.workspaces[workspaceIndex].directory = connection.codexWorkspace
+        try store.save(next, to: "chat-library.json")
+        draftSaveTask?.cancel()
+        library = next
+        if settings != connection { performanceHistory = [] }
+        settings = connection
+        settingsLoadIssue = nil
+        configurationLoadIssue = nil
+        errorMessage = loadIssues
         publishLibrary()
-        if libraryLoadIssue == nil, messagesLoadIssue == nil, recoveryLoadIssue == nil, !saveLibrary() {
-            throw CocoaError(.fileWriteUnknown)
+    }
+
+    private func validateCurrentConfiguration() {
+        configurationLoadIssue = nil
+        guard settingsLoadIssue == nil else { return }
+        do { settings = try settings.validated() }
+        catch {
+            configurationLoadIssue = "Could not use this chat's connection settings: \(error.localizedDescription) Open Connection to repair this chat, or select another conversation."
         }
     }
 
     private var loadIssues: String? {
-        let issues = [settingsLoadIssue, messagesLoadIssue, recoveryLoadIssue, libraryLoadIssue].compactMap { $0 }
+        let issues = [settingsLoadIssue, configurationLoadIssue, messagesLoadIssue, recoveryLoadIssue, libraryLoadIssue].compactMap { $0 }
         return issues.isEmpty ? nil : issues.joined(separator: "\n\n")
     }
 
     private func finishSuccess(_ id: UUID, response: ChatReply) {
         guard let request = activeRequest, request.id == id else { return }
         messages.append(request.message)
-        messages.append(ChatMessage(role: .assistant, content: response.content))
+        let attribution = response.attribution ?? ResponseAttribution(provider: request.configuration.provider,
+            model: request.configuration.activeModel, source: .requested)
+        messages.append(ChatMessage(role: .assistant, content: response.content, attribution: attribution))
         recordPerformance(outcome: .success, reply: response)
         clearActiveRequest()
         if !saveLibrary() {

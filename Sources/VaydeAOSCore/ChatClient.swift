@@ -119,7 +119,9 @@ public struct ChatClient: ChatServing {
             throw ChatClientError.emptyResponse
         }
         return ChatReply(content: content, inputTokens: completion.usage?.promptTokens,
-                         outputTokens: completion.usage?.completionTokens)
+            outputTokens: completion.usage?.completionTokens,
+            attribution: ResponseAttribution(provider: .compatibleAPI, model: completion.model ?? settings.model,
+                                             source: completion.model == nil ? .requested : .reported))
     }
 
     private static func limitError(data: Data, response: HTTPURLResponse) -> ChatClientError {
@@ -151,7 +153,7 @@ public struct ChatClient: ChatServing {
     }
 }
 
-private final class PrivateRequestDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class PrivateRequestDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -245,13 +247,18 @@ private struct RequestMessage: Encodable {
 private struct CompletionResponse: Decodable {
     let choices: [Choice]
     let usage: Usage?
+    let model: String?
 
-    private enum CodingKeys: String, CodingKey { case choices, usage }
+    private enum CodingKeys: String, CodingKey { case choices, usage, model }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         choices = try container.decode([Choice].self, forKey: .choices)
         // Optional telemetry must never discard an otherwise valid reply.
         usage = try? container.decode(Usage.self, forKey: .usage)
+        let reported = try? container.decode(String.self, forKey: .model)
+        model = reported.flatMap { value in
+            value.isEmpty || value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) ? nil : value
+        }
     }
 
     struct Usage: Decodable {

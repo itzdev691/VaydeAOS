@@ -107,7 +107,7 @@ struct SessionSidebar: View {
                         HStack(spacing: 10) {
                             Image(systemName: "cpu").font(.system(size: 25, weight: .ultraLight)).foregroundStyle(Console.blue)
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(session.settings.activeModel).font(Console.mono(13, weight: .medium)).lineLimit(2)
+                                Text(session.modelSelection.displayName).font(Console.mono(13, weight: .medium)).lineLimit(2)
                                 Text(session.settings.provider == .chatGPT ? "CHATGPT / AGENT RUNTIME" : "CHAT COMPLETIONS")
                                     .font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
                             }
@@ -161,33 +161,36 @@ struct SessionSidebar: View {
     }
 
     private var reasoningControl: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let efforts = session.modelSelection.availableEfforts
+        return VStack(alignment: .leading, spacing: 6) {
             InstrumentRow(label: "REASONING MODE", value: session.settings.reasoningEffort.label.uppercased(), color: Console.blue)
             Slider(value: Binding(
-                get: { Double(ConnectionSettings.ReasoningEffort.allCases.firstIndex(of: session.settings.reasoningEffort) ?? 0) },
+                get: { Double(efforts.firstIndex(of: session.settings.reasoningEffort) ?? 0) },
                 set: { value in
                     do {
-                        try session.setReasoningEffort(ConnectionSettings.ReasoningEffort.allCases[Int(value.rounded())])
+                        let index = min(max(Int(value.rounded()), 0), efforts.count - 1)
+                        try session.setReasoningEffort(efforts[index])
                         reasoningError = nil
                     } catch {
                         reasoningError = "Could not save reasoning mode. \(error.localizedDescription)"
                     }
                 }
-            ), in: 0...Double(ConnectionSettings.ReasoningEffort.allCases.count - 1), step: 1)
+            ), in: 0...Double(max(efforts.count - 1, 1)), step: 1)
             .controlSize(.small)
             .tint(Console.blue)
             .accessibilityLabel("Reasoning mode")
             .accessibilityValue(session.settings.reasoningEffort.label)
-            .disabled(session.isSending || session.codex.isChecking || session.codex.isRunning)
+            .disabled(session.isSending || session.codex.isChecking || session.codex.isRunning || efforts.count <= 1)
             HStack {
                 Text("AUTO")
                 Spacer()
-                Text("MAX")
+                Text(efforts.last?.label.uppercased() ?? "AUTO")
             }.font(Console.mono(8)).foregroundStyle(Console.muted)
-            Text(reasoningError ?? "Auto uses the model default. Available levels depend on the model.")
+            Text(reasoningError ?? session.modelSelection.issue ?? session.modelSelection.hint)
                 .font(Console.mono(8)).foregroundStyle(reasoningError == nil ? Console.muted : Console.amber)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .onChange(of: session.selectedChatID) { _ in reasoningError = nil }
     }
 
 }

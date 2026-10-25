@@ -90,6 +90,7 @@ struct ChatView: View {
             }
         }
         .environment(\.workspaceBootStep, reduceMotion ? 11 : bootStep)
+        .task(id: session.modelCatalogIdentity) { await session.refreshModels() }
         .task(id: bootReady) {
             guard bootReady else { return }
             if reduceMotion { bootStep = 11; return }
@@ -261,7 +262,7 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Image(systemName: "terminal").foregroundStyle(Console.blue)
-                    Text(session.settings.activeModel).foregroundStyle(Console.text).lineLimit(1)
+                    Text(session.modelSelection.displayName).foregroundStyle(Console.text).lineLimit(1)
                     if session.settings.provider == .chatGPT {
                         Link(session.codex.isSignedIn ? "Using ChatGPT plan" : "ChatGPT connection required",
                              destination: ChatGPTAccount.usageURL).foregroundStyle(Console.blue)
@@ -350,6 +351,11 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 9) {
+            ChatModelControls(session: session) { showingConnectionSettings = true }
+            if let transition = session.contextTransitionNotice {
+                Text(transition).font(Console.mono(10)).foregroundStyle(Console.amber)
+                    .fixedSize(horizontal: false, vertical: true).accessibilityLabel("Runtime context change: " + transition)
+            }
             if let notice = session.notice {
                 Text(notice).font(Console.mono(10)).foregroundStyle(Console.muted).textSelection(.enabled)
             }
@@ -426,30 +432,5 @@ private struct InterruptedTurnRow: View {
         .padding(10)
         .overlay(Rectangle().stroke(Console.amber.opacity(0.35)))
         .accessibilityElement(children: .contain).accessibilityLabel("Interrupted conversation attempt")
-    }
-}
-
-private struct MessageRow: View {
-    let message: ChatMessage
-    @State private var copied = false
-    private var isUser: Bool { message.role == .user }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text(isUser ? "YOU" : "AGENT").tracking(1.5).foregroundStyle(isUser ? Console.muted : Console.blue)
-                Rectangle().fill(Console.line).frame(height: 1)
-                Button {
-                    NSPasteboard.general.clearContents()
-                    copied = NSPasteboard.general.setString(message.content, forType: .string)
-                } label: {
-                    Label(copied ? "COPIED" : "COPY", systemImage: copied ? "checkmark" : "doc.on.doc")
-                }.buttonStyle(.plain).foregroundStyle(Console.muted).help("Copy message")
-            }.font(Console.mono(9, weight: .medium))
-            Text(message.content).font(.system(size: 13)).lineSpacing(5).textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.leading, 12).padding(.vertical, 5)
-        .overlay(alignment: .leading) { Rectangle().fill(isUser ? Console.line : Console.blue.opacity(0.5)).frame(width: 2) }
-        .accessibilityElement(children: .contain).accessibilityLabel(isUser ? "Your message" : "Assistant message")
     }
 }

@@ -13,13 +13,43 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
             else { throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown provider")) }
         }
     }
-    public enum ReasoningEffort: String, Codable, CaseIterable, Sendable {
-        case automatic, none, minimal, low, medium, high, xhigh, max
+    public struct ReasoningEffort: RawRepresentable, Codable, Hashable, CaseIterable, Sendable {
+        public let rawValue: String
+        public init?(rawValue: String) {
+            guard !rawValue.isEmpty, rawValue.count <= 64,
+                  !rawValue.unicodeScalars.contains(where: {
+                      CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0)
+                  }) else { return nil }
+            self.rawValue = rawValue
+        }
+        public static let automatic = Self(rawValue: "automatic")!
+        public static let none = Self(rawValue: "none")!
+        public static let minimal = Self(rawValue: "minimal")!
+        public static let low = Self(rawValue: "low")!
+        public static let medium = Self(rawValue: "medium")!
+        public static let high = Self(rawValue: "high")!
+        public static let xhigh = Self(rawValue: "xhigh")!
+        public static let max = Self(rawValue: "max")!
+        public static let ultra = Self(rawValue: "ultra")!
+        public static let allCases: [Self] = [.automatic, .none, .minimal, .low, .medium, .high, .xhigh, .max, .ultra]
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let raw = try container.decode(String.self)
+            guard let value = Self(rawValue: raw) else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid reasoning effort")
+            }
+            self = value
+        }
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
 
         public var label: String {
-            switch self {
-            case .automatic: return "Auto"
-            case .xhigh: return "Extra high"
+            switch rawValue {
+            case "automatic": return "Auto"
+            case "xhigh": return "Extra high"
             default: return rawValue.capitalized
             }
         }
@@ -50,6 +80,13 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
         }
     }
     public var selectedChatGPTModel: String { chatGPTModel ?? codexModel }
+
+    /// Credentials are external; the task folder belongs to the workspace, not the chat.
+    var chatConfiguration: Self {
+        var result = self
+        result.codexWorkspace = ""
+        return result
+    }
 
     public static let local = ConnectionSettings(
         baseURL: "http://127.0.0.1:11434/v1",
@@ -105,7 +142,7 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
                 result.baseURL = api.baseURL; result.model = api.model
             }
             guard !result.codexModel.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-                  (codexWorkspace.isEmpty ? !codexAllowsWrites : codexWorkspace.hasPrefix("/")),
+                  (codexWorkspace.isEmpty || codexWorkspace.hasPrefix("/")),
                   !codexWorkspace.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
                 throw ConnectionSettingsError.invalidWorkspace
             }
