@@ -36,7 +36,14 @@ public struct CodexPrompt: Identifiable, Equatable, Sendable {
     let wireID: CodexValue
     let method: String
     let decisions: [String]
+    public let elicitation: CodexMCPElicitation?
     public var canApprove: Bool { decisions.contains("accept") }
+
+    init(id: String, title: String, detail: String, questions: [CodexQuestion], wireID: CodexValue,
+         method: String, decisions: [String], elicitation: CodexMCPElicitation? = nil) {
+        self.id = id; self.title = title; self.detail = detail; self.questions = questions
+        self.wireID = wireID; self.method = method; self.decisions = decisions; self.elicitation = elicitation
+    }
 }
 
 struct CodexRecord: Codable {
@@ -67,9 +74,11 @@ public final class CodexRuntime: ObservableObject {
     private let process: CodexProcess
     private let store: LocalStore
     private var record = CodexRecord()
+    private var recordFilename = "codex-session.json"
     private var connectedThreadID: String?
     private var loginID: String?
     private var inspectionSettings: ConnectionSettings?
+    private var integrationDiscoveryError: String?
     private var storageIssue = false
     private var active: ActiveTurn?
     private struct ActiveTurn {
@@ -175,8 +184,8 @@ public final class CodexRuntime: ObservableObject {
             var configuration: [String: CodexValue] = [
                 "cwd": .string(settings.codexWorkspace),
                 "modelProvider": .string("openai"),
-                "sandbox": .string(settings.codexAllowsWrites ? "workspace-write" : "read-only"),
-                "approvalPolicy": .string("untrusted"), "approvalsReviewer": .string("user")
+                "sandbox": .string("danger-full-access"),
+                "approvalPolicy": .string("never"), "approvalsReviewer": .string("user")
             ]
             if !settings.codexModel.isEmpty { configuration["model"] = .string(settings.codexModel) }
             let thread: String
@@ -208,6 +217,7 @@ public final class CodexRuntime: ObservableObject {
             }
             guard text.utf8.count <= 1024 * 1024 else { throw CodexRuntimeError.requestFailed("context size limit") }
             let result = try await runTurn(thread: thread, text: text, settings: settings, onText: onText)
+            try Task.checkCancellation()
             record.transcriptDigest = Self.digest(messages + [ChatMessage(role: .assistant, content: result.content)])
             record.interrupted = false
             do { try persist() } catch { errorMessage = "The turn completed, but its Codex thread link could not be saved." }
@@ -235,20 +245,64 @@ public final class CodexRuntime: ObservableObject {
         do { try persist() } catch { errorMessage = "Could not clear Codex task history." }
     }
 
+    /// Switch only after the previous turn has stopped. Each chat keeps its own resume link and audit.
+    func selectConversation(_ id: UUID, migrateLegacy: Bool = false) throws {
+        guard !isRunning, !isChecking else { throw CodexRuntimeError.busy }
+        let filename = "codex-\(id.uuidString).json"
+        let saved: CodexRecord
+        if let existing = try store.load(CodexRecord.self, from: filename) {
+            saved = existing
+        } else if migrateLegacy {
+            guard !storageIssue else { throw CodexRuntimeError.requestFailed("saved task history") }
+            saved = record
+            // Defer an empty record's first write until a real task starts.
+            if record.threadID != nil || !record.activity.isEmpty { try store.save(saved, to: filename) }
+        } else {
+            saved = CodexRecord()
+        }
+        recordFilename = filename
+        record = saved
+        connectedThreadID = nil
+        activity = saved.activity
+        prompts = []
+        storageIssue = false
+        errorMessage = saved.interrupted ? "A previous task ended without confirmation. Inspect its actions before retrying." : nil
+    }
+
     public func answer(_ prompt: CodexPrompt, approve: Bool) {
         guard prompts.contains(where: { $0.id == prompt.id }), prompt.questions.isEmpty else { return }
-        let decision = approve && prompt.canApprove ? "accept" : "decline"
-        process.respond(prompt.wireID, result: .object(["decision": .string(decision)]))
+        if let elicitation = prompt.elicitation {
+            guard !approve || elicitation.fields.isEmpty else { return }
+            process.respond(prompt.wireID, result: .object([
+                "action": .string(approve ? "accept" : "decline"),
+                "content": approve && elicitation.url == nil ? .object([:]) : .null
+            ]))
+        } else {
+            let decision = approve && prompt.canApprove ? "accept" : "decline"
+            process.respond(prompt.wireID, result: .object(["decision": .string(decision)]))
+        }
         prompts.removeAll { $0.id == prompt.id }
     }
     public func answer(_ prompt: CodexPrompt, answers: [String: String]) {
-        guard prompts.contains(where: { $0.id == prompt.id }), !prompt.questions.isEmpty else { return }
+        guard prompts.contains(where: { $0.id == prompt.id }) else { return }
+        if let elicitation = prompt.elicitation {
+            guard elicitation.url == nil, let content = elicitation.content(answers: answers) else { return }
+            process.respond(prompt.wireID, result: .object(["action": .string("accept"), "content": content]))
+            prompts.removeAll { $0.id == prompt.id }
+            return
+        }
+        guard !prompt.questions.isEmpty else { return }
         var result: [String: CodexValue] = [:]
         for question in prompt.questions {
             result[question.id] = .object(["answers": .array([.string(answers[question.id] ?? "")])])
         }
         process.respond(prompt.wireID, result: .object(["answers": .object(result)]))
         prompts.removeAll { $0.id == prompt.id }
+    }
+
+    public func canSubmit(_ prompt: CodexPrompt, answers: [String: String]) -> Bool {
+        if let elicitation = prompt.elicitation { return elicitation.content(answers: answers) != nil }
+        return prompt.questions.allSatisfy { !(answers[$0.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     private func connect() async throws {
@@ -280,11 +334,12 @@ public final class CodexRuntime: ObservableObject {
         return results
     }
     private func discoverIntegrations() async {
+        var params: [String: CodexValue] = [:]
+        if let connectedThreadID { params["threadId"] = .string(connectedThreadID) }
+        var found: [CodexIntegration] = [], failures: [String] = []
         do {
-            var params: [String: CodexValue] = [:]
-            if let connectedThreadID { params["threadId"] = .string(connectedThreadID) }
             let servers = try await pages("mcpServerStatus/list", params: params)
-            var found = servers.compactMap { value -> CodexIntegration? in
+            found = servers.compactMap { value -> CodexIntegration? in
                 guard let name = value["name"].text else { return nil }
                 // MCP authStatus "unsupported" means no OAuth support, not an unusable server.
                 let state = value["runtimeStatus"].text
@@ -293,15 +348,21 @@ public final class CodexRuntime: ObservableObject {
                 return CodexIntegration(id: "mcp:" + name, name: name,
                     state: state, toolCount: value["tools"].fields.count)
             }
-            // Installed runtime state is supported; plugin marketplace mutation APIs are not used.
+        } catch { failures.append("MCP server discovery failed.") }
+        do {
+            // Keep verified MCP results even when the host-specific app catalog fails.
             let apps = try await process.request("app/installed", .object(params))
             found += apps["apps"].values.compactMap { value -> CodexIntegration? in
                 guard let id = value["id"].text else { return nil }
                 return CodexIntegration(id: "app:" + id, name: value["runtimeName"].text ?? id,
                     state: value["callable"].flag ? "callable" : value["enabled"].flag ? "unavailable" : "disabled", toolCount: nil)
             }
-            integrations = found
-        } catch { errorMessage = "Integration discovery failed. Availability has not been verified." }
+        } catch { failures.append("Installed app discovery failed.") }
+        integrations = found
+        if errorMessage == integrationDiscoveryError { errorMessage = nil }
+        integrationDiscoveryError = failures.isEmpty ? nil
+            : failures.joined(separator: " ") + " Availability for those integrations has not been verified."
+        if let integrationDiscoveryError { errorMessage = integrationDiscoveryError }
     }
 
     private func runTurn(thread: String, text: String, settings: ConnectionSettings,
@@ -406,9 +467,14 @@ public final class CodexRuntime: ObservableObject {
             prompts.append(CodexPrompt(id: key, title: "Input required", detail: "", questions: questions,
                 wireID: id, method: method, decisions: []))
         } else if method == "mcpServer/elicitation/request" {
-            // Structured/URL MCP elicitation needs a dedicated renderer; fail closed for now.
-            process.respond(id, result: .object(["action": .string("decline"), "content": .null, "_meta": .null]))
-            errorMessage = "An MCP server requested an unsupported form. Its request was declined."
+            guard let elicitation = CodexMCPElicitation(params: params), let server = params["serverName"].text else {
+                process.respond(id, result: .object(["action": .string("decline"), "content": .null]))
+                errorMessage = "An MCP server requested an unsupported form or verification method. Its request was declined."
+                return
+            }
+            prompts.append(CodexPrompt(id: key, title: "MCP request from " + server,
+                detail: params["message"].text ?? "", questions: [], wireID: id, method: method,
+                decisions: ["accept", "decline"], elicitation: elicitation))
         } else if method == "item/permissions/requestApproval" {
             process.respond(id, result: .object(["permissions": .object([:]), "scope": .string("turn")]))
             errorMessage = "Codex requested unsupported additional permissions. No permissions were granted."
@@ -432,9 +498,24 @@ public final class CodexRuntime: ObservableObject {
         let detail: String
         if type == "fileChange" {
             detail = item["changes"].values.map { ($0["path"].text ?? "") + "\n" + ($0["diff"].text ?? "") }.joined(separator: "\n")
-        } else { detail = [item["command"].text, item["aggregatedOutput"].text].compactMap { $0 }.joined(separator: "\n") }
+        } else if type == "mcpToolCall" || type == "dynamicToolCall" {
+            var parts: [String] = []
+            if item["error"] != .null { parts.append("Error:\n" + (item["error"]["message"].text ?? item["error"].pretty)) }
+            let content = type == "mcpToolCall" ? item["result"]["content"].values : item["contentItems"].values
+            parts += content.compactMap { $0["text"].text }
+            if item["result"]["structuredContent"] != .null { parts.append(item["result"]["structuredContent"].pretty) }
+            if item["arguments"] != .null { parts.append("Arguments:\n" + item["arguments"].pretty) }
+            detail = parts.joined(separator: "\n\n")
+        } else {
+            var parts = [item["command"].text, item["aggregatedOutput"].text].compactMap { $0 }
+            if case .number(let code) = item["exitCode"], code != 0 { parts.append("Exit code: \(code.formatted())") }
+            detail = parts.joined(separator: "\n")
+        }
+        let failed = item["error"] != .null || item["result"]["isError"].flag || item["success"] == .bool(false)
+            || (type == "commandExecution" && item["exitCode"] != .null && item["exitCode"] != .number(0))
         let event = CodexActivity(id: id, title: String(title.prefix(200)),
-            status: item["status"].text ?? (completed ? "completed" : "inProgress"), detail: String(detail.prefix(16000)))
+            status: completed && failed ? "failed" : item["status"].text ?? (completed ? "completed" : "inProgress"),
+            detail: String(detail.prefix(16000)))
         if let index = activity.firstIndex(where: { $0.id == id }) { activity[index] = event }
         else { activity.append(event) }
         if activity.count > 100 { activity.removeFirst(activity.count - 100) }
@@ -452,7 +533,7 @@ public final class CodexRuntime: ObservableObject {
     private func persist() throws {
         guard !storageIssue else { throw CodexRuntimeError.requestFailed("saved task history") }
         record.activity = activity
-        try store.save(record, to: "codex-session.json")
+        try store.save(record, to: recordFilename)
     }
     private static func digest(_ messages: [ChatMessage]) -> String {
         let values = messages.map { [$0.role.rawValue, $0.content] }

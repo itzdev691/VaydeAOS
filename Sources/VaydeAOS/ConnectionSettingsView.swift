@@ -72,7 +72,7 @@ struct ConnectionSettingsView: View {
                         .font(.system(size: 12)).foregroundStyle(Console.amber).fixedSize(horizontal: false, vertical: true)
                 }
                 ChatGPTConnectionView(runtime: session.codex, model: $codexModel, workspace: $codexWorkspace,
-                    allowsWrites: $codexAllowsWrites, settings: session.settings)
+                    settings: session.settings)
             } else {
                 compatibleAPIFields
             }

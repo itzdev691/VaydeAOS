@@ -6,7 +6,6 @@ struct ChatGPTConnectionView: View {
     @ObservedObject var runtime: CodexRuntime
     @Binding var model: String
     @Binding var workspace: String
-    @Binding var allowsWrites: Bool
     let settings: ConnectionSettings
     @State private var loginError: String?
 
@@ -55,7 +54,7 @@ struct ChatGPTConnectionView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Workspace folder (optional)").font(Console.mono(10)).foregroundStyle(Console.blue)
-                    Text(workspace.isEmpty ? "Private read-only chat workspace" : workspace)
+                    Text(workspace.isEmpty ? "Private chat workspace" : workspace)
                         .font(Console.mono(11)).textSelection(.enabled).lineLimit(3)
                 }
                 Spacer()
@@ -67,10 +66,7 @@ struct ChatGPTConnectionView: View {
                     if picker.runModal() == .OK, let url = picker.url { workspace = url.resolvingSymlinksInPath().path }
                 }
             }
-            Toggle("Allow shell and file writes in this workspace", isOn: $allowsWrites)
-                .font(.system(size: 12))
-                .disabled(workspace.isEmpty)
-            Text("Shell access starts read only. Commands can request approval. MCP services use their own account scopes and are not confined by the shell sandbox. Stop does not undo completed actions.")
+            Text("Full command access is enabled. Commands can read and write files and access the network without runtime approval prompts. macOS permissions and connected-service scopes still apply. Stop does not undo completed actions.")
                 .font(.system(size: 11)).foregroundStyle(Console.muted).fixedSize(horizontal: false, vertical: true)
             if !runtime.integrations.isEmpty {
                 DisclosureGroup("Integrations (\(runtime.integrations.count))") {
@@ -146,6 +142,34 @@ private struct CodexPromptView: View {
                 ScrollView { Text(prompt.detail).font(Console.mono(11)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                     .frame(maxHeight: 180)
             }
+            if let elicitation = prompt.elicitation {
+                if let url = elicitation.url {
+                    Link("Open requested page: " + (url.host ?? url.absoluteString), destination: url)
+                        .font(.system(size: 12))
+                    Text(url.absoluteString).font(Console.mono(10)).textSelection(.enabled)
+                    Text("Complete the browser step before continuing. Opening the page does not approve this request.")
+                        .font(.system(size: 11)).foregroundStyle(Console.muted)
+                }
+                ForEach(elicitation.fields) { field in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(field.title + (field.required ? " (required)" : " (optional)"))
+                            .font(.system(size: 12))
+                        if !field.detail.isEmpty {
+                            Text(field.detail).font(.system(size: 11)).foregroundStyle(Console.muted)
+                        }
+                        if field.options.isEmpty {
+                            TextField("Answer", text: binding(field.id)).textFieldStyle(.roundedBorder)
+                        } else {
+                            Picker(field.title, selection: binding(field.id)) {
+                                Text("Choose…").tag("")
+                                ForEach(field.options.indices, id: \.self) { index in
+                                    Text(field.options[index]).tag(field.optionValue(at: index))
+                                }
+                            }.labelsHidden()
+                        }
+                    }
+                }
+            }
             ForEach(prompt.questions) { question in
                 VStack(alignment: .leading, spacing: 6) {
                     Text(question.text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
@@ -163,7 +187,16 @@ private struct CodexPromptView: View {
             HStack {
                 Button("Stop task") { runtime.cancel() }
                 Spacer()
-                if prompt.questions.isEmpty {
+                if let elicitation = prompt.elicitation {
+                    Button("Decline") { runtime.answer(prompt, approve: false) }
+                        .buttonStyle(ConsoleButtonStyle())
+                    Button(elicitation.url == nil ? "Submit and allow once" : "Continue after browser step") {
+                        if elicitation.url != nil { runtime.answer(prompt, approve: true) }
+                        else { runtime.answer(prompt, answers: answers) }
+                    }
+                    .buttonStyle(ConsoleButtonStyle(prominent: true))
+                    .disabled(!runtime.canSubmit(prompt, answers: answers))
+                } else if prompt.questions.isEmpty {
                     Button("Decline") { runtime.answer(prompt, approve: false) }
                         .buttonStyle(ConsoleButtonStyle())
                     Button("Allow once") { runtime.answer(prompt, approve: true) }
@@ -171,7 +204,7 @@ private struct CodexPromptView: View {
                 } else {
                     Button("Submit answers") { runtime.answer(prompt, answers: answers) }
                         .buttonStyle(ConsoleButtonStyle(prominent: true))
-                        .disabled(prompt.questions.contains { (answers[$0.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+                        .disabled(!runtime.canSubmit(prompt, answers: answers))
                 }
             }.font(Console.mono(10))
         }

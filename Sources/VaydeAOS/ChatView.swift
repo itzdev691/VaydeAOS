@@ -13,6 +13,7 @@ struct ChatView: View {
     @FocusState private var composerFocused: Bool
     @State private var workspaceMode = WorkspaceMode.workspace
     @State private var chatPresented = false
+    @AppStorage("chat.sidebarVisible") private var chatSidebarVisible = true
     @State private var lastInteraction = Date()
     @State private var events = [WorkspaceEvent(title: "Workspace initialized")]
     @AppStorage("workspace.autoIdle") private var autoIdle = true
@@ -28,7 +29,11 @@ struct ChatView: View {
                 header.workspaceBoot(stage: 0, label: "DISPLAY")
                 navigation.workspaceBoot(stage: 1, label: "NAVIGATION")
                 HStack(alignment: .top, spacing: 12) {
-                    if workspaceMode != .focus {
+                    if chatPresented && chatSidebarVisible {
+                        ChatSidebar(session: session, openChat: { openChat() })
+                            .frame(width: geometry.size.width < 1250 ? 208 : 238)
+                            .workspaceBoot(stage: 2, label: "CHAT HISTORY")
+                    } else if !chatPresented && workspaceMode != .focus {
                         TelemetrySidebar(telemetry: telemetry)
                             .workspaceBoot(stage: 2, label: "HOST INSTRUMENTS")
                             .frame(width: geometry.size.width < 1250 ? 208 : 238)
@@ -50,6 +55,10 @@ struct ChatView: View {
                             VStack(spacing: 12) {
                                 HStack {
                                     Circle().fill(Console.green).frame(width: 5, height: 5)
+                                    Button { chatSidebarVisible.toggle() } label: {
+                                        Image(systemName: "sidebar.left")
+                                    }.buttonStyle(.plain).accessibilityLabel("Toggle chat sidebar")
+                                        .help("Show or hide chats")
                                     Text("CHANNEL OPEN").tracking(1.2)
                                     Spacer()
                                     Button { enterIdle() } label: {
@@ -128,6 +137,7 @@ struct ChatView: View {
         .onChange(of: scenePhase) { phase in
             if phase == .background { telemetry.stop() } else { telemetry.start() }
         }
+        .onChange(of: session.selectedChatID) { _ in openChat() }
         .onChange(of: session.isSending) { sending in
             lastInteraction = Date()
             record(sending ? "Model request started" : "Model request finished")
@@ -261,7 +271,7 @@ struct ChatView: View {
                     Button { session.newChat(); composerFocused = true } label: {
                         Label("NEW CHAT", systemImage: "plus")
                     }
-                    .buttonStyle(.plain).foregroundStyle(Console.blue).help("New chat (Command-N)").accessibilityLabel("New chat")
+                    .buttonStyle(.plain).foregroundStyle(Console.blue).disabled(!session.canOrganizeChats).help("New chat (Command-N)").accessibilityLabel("New chat")
                 }
                 .font(Console.mono(10)).padding(.horizontal, 16).frame(height: 38)
                 .background(Console.background.opacity(0.45))
@@ -328,6 +338,7 @@ struct ChatView: View {
             }
             .accessibilityLabel("Conversation")
             .onAppear { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+            .onChange(of: session.selectedChatID) { _ in scrollToBottom(proxy) }
             .onChange(of: session.messages.count) { _ in scrollToBottom(proxy) }
             .onChange(of: session.pendingMessage?.id) { _ in scrollToBottom(proxy) }
             .onChange(of: session.partialReply) { _ in scrollToBottom(proxy) }
@@ -364,7 +375,7 @@ struct ChatView: View {
                 }
             }
             HStack {
-                Text("TEXT CHANNEL").tracking(1).foregroundStyle(Console.muted)
+                ChatWorkspacePicker(session: session)
                 Spacer()
                 Text("⌘ ↵").foregroundStyle(Console.muted).padding(.trailing, 4)
                 if session.isSending {

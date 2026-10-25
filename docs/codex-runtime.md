@@ -24,16 +24,16 @@ skills, and compatible plugin configuration are reused by the runtime. Credentia
 are never copied into VaydeAOS settings, Obsidian notes, or activity summaries.
 
 A workspace folder is optional. An unselected folder uses a private
-`~/Library/Application Support/VaydeAOS/Workspace` directory in read-only mode.
-Workspace writes require an explicitly selected folder.
+`~/Library/Application Support/VaydeAOS/Workspace` directory. The selected folder
+sets task context; it does not restrict command access.
 
 ### Migration from the two connection choices
 
 Both saved provider identifiers, `chatGPT` and `codex`, now decode to the single
 `chatGPT` provider. The previously active provider's model wins when both legacy
 model fields exist. Conversations and retained API settings are preserved. Legacy
-direct-chat connections start read only; explicitly selected runtime write access
-is retained. New settings carry a version marker so migration is not repeated.
+write-access flags are retained for compatibility but no longer restrict command
+execution. New settings carry a version marker so migration is not repeated.
 
 The former Node helper is no longer instantiated by ChatSession or included in
 app builds. Its existing encrypted credential files are preserved without reading,
@@ -53,18 +53,21 @@ there is no automatic fresh-thread fallback or action retry.
 
 ## Permissions and cancellation
 
-Shell/file access starts with Codex's **read-only** sandbox. The optional workspace
-write setting selects **workspace-write** for the chosen folder. These are Codex's
-sandbox policies; selecting a folder does not restrict every file read to that
-folder. MCP servers and connected services enforce their own resource scopes;
-the shell sandbox does not confine an MCP server's remote or local side effects.
-Inherited tool approvals and connected-service policies still apply.
+Each new or resumed runtime thread explicitly selects `sandbox: danger-full-access`
+and `approvalPolicy: never`. Commands run without Codex filesystem or network
+sandbox restrictions and without runtime approval prompts, using the macOS
+account's existing authority. This does not grant root privileges or bypass macOS
+privacy permissions. MCP servers and connected services retain their own resource
+scopes and account policies. The settings panel displays full command access;
+the former workspace-write toggle is no longer shown.
 
-Each runtime thread explicitly selects `approvalPolicy: untrusted` and the human
-approval reviewer, instead of inheriting a globally unrestricted shell policy.
-Native controls support command/file approval, decline, and structured tool
-questions. Unsupported MCP forms, URL elicitations, additional permission requests,
-and unknown client requests fail closed. Local plugin hooks retain Codex's own
+Native controls retain support for command/file approval, decline, and structured tool
+questions. Standard MCP forms support strings, booleans, numbers, integers, and
+single-choice fields. Required fields, ranges, and choices are validated before
+sending typed content. Forms wait for an explicit submission or decline; no choice
+is preselected. HTTPS URL elicitations display the full destination and a separate
+browser link, then require explicit continuation. Unsupported schemas, device
+verification, additional permission requests, and unknown client requests fail closed. Local plugin hooks retain Codex's own
 trust requirements. Desktop-specific tools can remain unavailable outside their
 original host. Portable components do not imply full plugin or UI compatibility.
 
@@ -75,22 +78,32 @@ back, and already dispatched external operations may finish. No retry is automat
 
 ## History and evidence
 
-`~/Library/Application Support/VaydeAOS/codex-session.json` stores the thread link,
+`~/Library/Application Support/VaydeAOS/codex-<chat UUID>.json` stores each chat's thread link,
 workspace/settings scope, a digest of the committed transcript, an interrupted
 marker, and up to 100 activity summaries. It uses the same 0700 directory / 0600
 file permissions as existing app storage. Raw command output, command lines, file
 diffs, and question answers are not serialized in this app audit file. Tool detail
-is available in memory during the app session. Codex keeps its own independent
+is available in memory during the app session. MCP errors and text results,
+dynamic tool failures, command exit codes, and tool arguments appear under activity
+Details; these details and form answers stay out of the app audit file. A tool
+failure remains visible even if the model recovers and completes the turn.
+MCP and installed-app discovery run independently, retaining each successful
+catalog when the other fails. Codex keeps its own independent
 thread history under its configured home, subject to its own storage policies.
 
 Only a `turn/completed` event with status `completed` commits an assistant reply.
 Failures, malformed output, disconnection, timeout, and cancellation preserve the
 prompt and the last committed conversation. Interrupted attempts and any received
 assistant text remain visible, explicitly marked incomplete, and are saved with
-0600 permissions in `interrupted-turns.json`. They survive relaunch and remain in
+0600 permissions alongside that chat's completed turns and draft in `chat-library.json`. They survive relaunch and remain in
 their original position when subsequent turns complete. They are not submitted as
 completed model history, and recovery never starts a model request or repeats a
-tool action automatically. **New Chat** clears this local recovery history too.
+tool action automatically. **New Chat** creates a separate conversation and preserves
+prior completed and interrupted history. The legacy `conversation.json`,
+`interrupted-turns.json`, and `codex-session.json` are imported into the first chat
+without rewriting the original files. The workspace selector below the composer
+selects a separate chat group and task folder; each group remembers its selected chat.
+Accounts and model settings remain shared. Stop generation before switching chats.
 
 The stdout reader applies pipe backpressure when the UI is busy instead of dropping
 queued chunks and disconnecting. It drains stdout before handling process exit,
@@ -128,8 +141,20 @@ VAYDEAOS_CODEX_SMOKE="$PWD/build/VaydeAOS.app/Contents/Resources/Codex/bin/codex
   ./test.sh --filter bundledRuntimeSmokeWhenExplicitlyEnabled
 ```
 
+A separate read-only MCP check uses the app's Swift transport and configured
+Obsidian server without a model request:
+
+```sh
+VAYDEAOS_CODEX_SMOKE="$PWD/build/VaydeAOS.app/Contents/Resources/Codex/bin/codex" \
+VAYDEAOS_CODEX_MCP=1 ./test.sh --filter bundledMCPReadOnlySmokeWhenExplicitlyEnabled
+```
+
+This calls only `list_allowed_directories`; it does not establish permission to
+control Dock or other native apps. Host app permissions still apply, and shell
+commands that create temporary files still require write permission.
+
 Adding `VAYDEAOS_CODEX_LIVE=1` makes one model request against the configured Codex
-account, reads a marker file in a temporary read-only workspace, and checks the
+account, reads a marker file in a temporary workspace, and checks the
 reply and tool evidence. This uses account allowance; ordinary tests do not.
 A successful live check establishes that specific file/tool/model path, not every
 installed plugin or native UI workflow.

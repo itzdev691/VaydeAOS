@@ -109,7 +109,7 @@ public struct ConnectionSettings: Codable, Equatable, Sendable {
                   !codexWorkspace.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
                 throw ConnectionSettingsError.invalidWorkspace
             }
-            // An unselected folder uses the app's private read-only chat workspace.
+            // An unselected folder uses the app's private chat workspace.
             if codexWorkspace.isEmpty { return result }
             var directory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: codexWorkspace, isDirectory: &directory), directory.boolValue else {

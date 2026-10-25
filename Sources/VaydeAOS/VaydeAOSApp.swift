@@ -23,6 +23,7 @@ struct VaydeAOSApp: App {
                 if session.settings.provider == .chatGPT { await session.codex.refresh(settings: session.settings) }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                session.saveDraft()
                 session.codex.shutdown()
             }
         }
@@ -36,7 +37,7 @@ struct VaydeAOSApp: App {
                     NotificationCenter.default.post(name: .vaydeOpenChat, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: .command)
-                .disabled(!startupComplete)
+                .disabled(!startupComplete || !session.canOrganizeChats)
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Connection Settings…") {

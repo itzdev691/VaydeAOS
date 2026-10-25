@@ -3,7 +3,17 @@ import Foundation
 
 @MainActor
 public final class ChatSession: ObservableObject {
-    @Published public var draft = ""
+    @Published public var draft = "" {
+        didSet { scheduleDraftSave() }
+    }
+    @Published public private(set) var workspaces: [ChatWorkspace] = []
+    @Published public private(set) var chats: [SavedChat] = []
+    @Published public private(set) var selectedWorkspaceID: UUID
+    @Published public private(set) var selectedChatID: UUID
+    private var library: ChatLibrary
+    private var libraryReady = false
+    private var libraryLoadIssue: String?
+    private var draftSaveTask: Task<Void, Never>?
     @Published public private(set) var messages: [ChatMessage] = []
     @Published public private(set) var settings: ConnectionSettings = .local
     @Published public private(set) var isSending = false
@@ -43,6 +53,10 @@ public final class ChatSession: ObservableObject {
         credentials: any CredentialStoring = KeychainCredentialStore(),
         codex: CodexRuntime? = nil
     ) {
+        let initialLibrary = ChatLibrary(directory: "")
+        library = initialLibrary
+        selectedWorkspaceID = initialLibrary.selectedWorkspaceID
+        selectedChatID = initialLibrary.chats[0].id
         self.client = client
         self.store = store
         self.credentials = credentials
@@ -57,19 +71,44 @@ public final class ChatSession: ObservableObject {
         }
 
         do {
-            messages = try store.loadMessages()
-        } catch {
-            messagesLoadIssue = "Could not load the saved conversation: \(error.localizedDescription) Start a New Chat to replace the existing file."
-        }
-        do {
-            interruptedTurns = try store.load([InterruptedTurn].self, from: "interrupted-turns.json") ?? []
-            if let last = interruptedTurns.last, last.afterMessageCount >= messages.count {
-                draft = last.originalDraft
-                notice = "Interrupted conversation restored. Saved partial responses are incomplete; completed tool actions may remain."
+            if let saved = try store.load(ChatLibrary.self, from: "chat-library.json") {
+                library = try saved.validated()
+                selectedWorkspaceID = library.selectedWorkspaceID
+                let workspace = library.workspaces.first { $0.id == selectedWorkspaceID }!
+                selectedChatID = workspace.selectedChatID
+                let chat = library.chats.first { $0.id == selectedChatID }!
+                messages = chat.messages
+                interruptedTurns = chat.interruptedTurns
+                draft = chat.draft
+                if !interruptedTurns.isEmpty {
+                    notice = "Interrupted conversation restored. Saved partial responses are incomplete; completed tool actions may remain."
+                }
+                settings.codexWorkspace = workspace.directory
+                do { try self.codex.selectConversation(selectedChatID) }
+                catch { recoveryLoadIssue = "Could not load this chat's task history. Start a New Chat or select another conversation. Saved files have been preserved." }
+            } else {
+                // Import without deleting or rewriting the original single-chat files.
+                library.workspaces[0].directory = settings.codexWorkspace
+                do { messages = try store.loadMessages() }
+                catch { messagesLoadIssue = "Could not load the saved conversation: \(error.localizedDescription) Start a New Chat to recover; the original file will be preserved." }
+                do {
+                    interruptedTurns = try store.load([InterruptedTurn].self, from: "interrupted-turns.json") ?? []
+                    if let last = interruptedTurns.last, last.afterMessageCount >= messages.count {
+                        draft = last.originalDraft
+                        notice = "Interrupted conversation restored. Saved partial responses are incomplete; completed tool actions may remain."
+                    }
+                } catch {
+                    recoveryLoadIssue = "Could not load interrupted responses: \(error.localizedDescription) Start a New Chat to recover; the original file will be preserved."
+                }
+                do { try self.codex.selectConversation(selectedChatID, migrateLegacy: true) }
+                catch { recoveryLoadIssue = "Could not load the previous task history. Start a New Chat to recover. The original file has been preserved." }
             }
         } catch {
-            recoveryLoadIssue = "Could not load interrupted responses: \(error.localizedDescription) Start a New Chat to replace the existing file."
+            libraryLoadIssue = "Could not load the chat library: \(error.localizedDescription) The saved files have been preserved."
         }
+        snapshotCurrentChat()
+        publishLibrary()
+        libraryReady = true
         errorMessage = loadIssues
         if settings.needsChatGPTAccountReview {
             notice = "The ChatGPT connections were merged. Confirm the displayed account in Connection Settings before sending."
@@ -91,7 +130,13 @@ public final class ChatSession: ObservableObject {
         let connection: ConnectionSettings
         let apiKey: String?
         do {
-            connection = try settings.validated()
+            var selectedConnection = try settings.validated()
+            if selectedConnection.provider == .chatGPT && selectedConnection.codexWorkspace.isEmpty {
+                selectedConnection.codexWorkspace = store.directory.appendingPathComponent("Workspaces/\(selectedWorkspaceID.uuidString)", isDirectory: true).path
+                try FileManager.default.createDirectory(atPath: selectedConnection.codexWorkspace,
+                    withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            }
+            connection = selectedConnection
             apiKey = try self.apiKey(for: connection)
             request = ActiveRequest(
                 id: UUID(),
@@ -111,6 +156,7 @@ public final class ChatSession: ObservableObject {
         draft = ""
         errorMessage = nil
         notice = nil
+        saveLibrary()
 
         sendTask = Task { [weak self, client] in
             do {
@@ -158,26 +204,156 @@ public final class ChatSession: ObservableObject {
         draft = request.originalDraft
         errorMessage = recoveryError
         notice = cancellationNotice
+        saveLibrary()
     }
 
+    public var selectedWorkspace: ChatWorkspace {
+        workspaces.first { $0.id == selectedWorkspaceID }!
+    }
+
+    public var workspaceChats: [SavedChat] {
+        chats.filter { $0.workspaceID == selectedWorkspaceID }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    public var canOrganizeChats: Bool { libraryLoadIssue == nil && !isSending && !codex.isRunning && !codex.isChecking }
+
     public func newChat() {
-        sendTask?.cancel()
-        codex.newChat()
-        recordPerformance(outcome: .cancelled)
-        clearActiveRequest()
-        draft = ""
-        messages = []
-        interruptedTurns = []
-        messagesLoadIssue = nil
-        recoveryLoadIssue = nil
-        errorMessage = settingsLoadIssue
-        notice = nil
-        do {
-            try store.saveMessages(messages)
-            try store.save(interruptedTurns, to: "interrupted-turns.json")
-        } catch {
-            errorMessage = "Could not clear the saved conversation: \(error.localizedDescription)"
+        // New Chat preserves the old transcript. Stop a compatible request before archiving it.
+        guard libraryLoadIssue == nil, !codex.isRunning, !codex.isChecking else { return }
+        if isSending { stop() }
+        guard saveLibrary(allowRecovery: true) else { return }
+        let chat = SavedChat(id: UUID(), workspaceID: selectedWorkspaceID)
+        var next = library
+        next.chats.append(chat)
+        next.workspaces[next.workspaces.firstIndex { $0.id == selectedWorkspaceID }!].selectedChatID = chat.id
+        commitSelection(next, chatID: chat.id)
+    }
+
+    public func selectChat(_ id: UUID) {
+        guard canOrganizeChats, id != selectedChatID,
+              let chat = library.chats.first(where: { $0.id == id && $0.workspaceID == selectedWorkspaceID }),
+              saveLibrary(allowRecovery: true) else { return }
+        var next = library
+        next.workspaces[next.workspaces.firstIndex { $0.id == selectedWorkspaceID }!].selectedChatID = chat.id
+        commitSelection(next, chatID: chat.id)
+    }
+
+    public func selectWorkspace(_ id: UUID) {
+        guard canOrganizeChats, id != selectedWorkspaceID,
+              let workspace = library.workspaces.first(where: { $0.id == id }), saveLibrary(allowRecovery: true) else { return }
+        var next = library
+        next.selectedWorkspaceID = id
+        commitSelection(next, chatID: workspace.selectedChatID)
+    }
+
+    public func createWorkspace(named name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canOrganizeChats, !name.isEmpty, saveLibrary(allowRecovery: true) else { return }
+        let id = UUID()
+        let chat = SavedChat(id: UUID(), workspaceID: id)
+        var next = library
+        next.workspaces.append(ChatWorkspace(id: id, name: name, directory: "", selectedChatID: chat.id))
+        next.chats.append(chat)
+        next.selectedWorkspaceID = id
+        commitSelection(next, chatID: chat.id)
+    }
+
+    public func renameWorkspace(_ id: UUID, to name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canOrganizeChats, !name.isEmpty, let index = library.workspaces.firstIndex(where: { $0.id == id }) else { return }
+        library.workspaces[index].name = name
+        saveLibrary()
+    }
+
+    public func renameChat(_ id: UUID, to name: String) {
+        guard canOrganizeChats, let index = library.chats.firstIndex(where: { $0.id == id }) else { return }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        library.chats[index].name = name.isEmpty ? nil : name
+        saveLibrary()
+    }
+
+    public func deleteChat(_ id: UUID) {
+        guard canOrganizeChats, let chat = library.chats.first(where: { $0.id == id }),
+              chat.workspaceID == selectedWorkspaceID, saveLibrary() else { return }
+        var next = library
+        next.chats.removeAll { $0.id == id }
+        if id == selectedChatID {
+            let replacement: SavedChat
+            if let existing = next.chats.first(where: { $0.workspaceID == selectedWorkspaceID }) { replacement = existing }
+            else {
+                replacement = SavedChat(id: UUID(), workspaceID: selectedWorkspaceID)
+                next.chats.append(replacement)
+            }
+            next.workspaces[next.workspaces.firstIndex { $0.id == selectedWorkspaceID }!].selectedChatID = replacement.id
+            commitSelection(next, chatID: replacement.id)
+        } else {
+            do { try store.save(next, to: "chat-library.json"); library = next; publishLibrary() }
+            catch { errorMessage = "Could not delete chat: \(error.localizedDescription)" }
         }
+    }
+
+    /// Flush on navigation and termination as well as after a short typing pause.
+    public func saveDraft() { saveLibrary() }
+
+    private func scheduleDraftSave() {
+        guard libraryReady, messagesLoadIssue == nil, recoveryLoadIssue == nil else { return }
+        draftSaveTask?.cancel()
+        draftSaveTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 300_000_000); try Task.checkCancellation() }
+            catch { return }
+            self?.saveLibrary()
+        }
+    }
+
+    @discardableResult
+    private func saveLibrary(allowRecovery: Bool = false) -> Bool {
+        guard libraryLoadIssue == nil,
+              allowRecovery || (messagesLoadIssue == nil && recoveryLoadIssue == nil) else { return false }
+        draftSaveTask?.cancel()
+        snapshotCurrentChat()
+        publishLibrary()
+        do { try store.save(library, to: "chat-library.json"); return true }
+        catch { errorMessage = "Could not save the chat library: \(error.localizedDescription)"; return false }
+    }
+
+    private func snapshotCurrentChat() {
+        guard let index = library.chats.firstIndex(where: { $0.id == selectedChatID }) else { return }
+        let savedDraft = activeRequest?.originalDraft ?? draft
+        let changed = library.chats[index].messages != messages || library.chats[index].draft != savedDraft
+            || library.chats[index].interruptedTurns != interruptedTurns
+        library.chats[index].messages = messages
+        library.chats[index].draft = savedDraft
+        library.chats[index].interruptedTurns = interruptedTurns
+        if changed { library.chats[index].updatedAt = Date() }
+    }
+
+    private func publishLibrary() {
+        workspaces = library.workspaces
+        chats = library.chats
+    }
+
+    private func commitSelection(_ next: ChatLibrary, chatID: UUID) {
+        let previousID = selectedChatID
+        do {
+            try codex.selectConversation(chatID)
+            do { try store.save(next, to: "chat-library.json") }
+            catch { try? codex.selectConversation(previousID); throw error }
+            library = next
+            selectedWorkspaceID = next.selectedWorkspaceID
+            selectedChatID = chatID
+            let chat = next.chats.first { $0.id == chatID }!
+            draft = chat.draft
+            messages = chat.messages
+            interruptedTurns = chat.interruptedTurns
+            settings.codexWorkspace = next.workspaces.first { $0.id == selectedWorkspaceID }!.directory
+            messagesLoadIssue = nil
+            recoveryLoadIssue = nil
+            errorMessage = settingsLoadIssue
+            notice = interruptedTurns.isEmpty ? nil
+                : "Saved partial responses are incomplete; completed tool actions may remain."
+            performanceHistory = []
+            publishLibrary()
+        } catch { errorMessage = "Could not open chat: \(error.localizedDescription)" }
     }
 
     public func dismissError() {
@@ -228,8 +404,9 @@ public final class ChatSession: ObservableObject {
             try store.saveSettings(connection)
             if self.settings != connection { performanceHistory = [] }
             self.settings = connection
+            try updateWorkspaceDirectory(connection.codexWorkspace)
             settingsLoadIssue = nil
-            errorMessage = messagesLoadIssue
+            errorMessage = loadIssues
             notice = "ChatGPT connection saved. Agent tools use the bundled runtime."
             return
         }
@@ -245,15 +422,25 @@ public final class ChatSession: ObservableObject {
         }
         if self.settings != connection { performanceHistory = [] }
         self.settings = connection
+        try updateWorkspaceDirectory(connection.codexWorkspace)
         settingsLoadIssue = nil
-        errorMessage = messagesLoadIssue
+        errorMessage = loadIssues
         notice = rememberAPIKey
             ? "Settings saved."
             : "Settings saved. The API key is held only until you quit this app; existing Keychain entries are unchanged."
     }
 
+    private func updateWorkspaceDirectory(_ directory: String) throws {
+        guard let index = library.workspaces.firstIndex(where: { $0.id == selectedWorkspaceID }) else { return }
+        library.workspaces[index].directory = directory
+        publishLibrary()
+        if libraryLoadIssue == nil, messagesLoadIssue == nil, recoveryLoadIssue == nil, !saveLibrary() {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
     private var loadIssues: String? {
-        let issues = [settingsLoadIssue, messagesLoadIssue, recoveryLoadIssue].compactMap { $0 }
+        let issues = [settingsLoadIssue, messagesLoadIssue, recoveryLoadIssue, libraryLoadIssue].compactMap { $0 }
         return issues.isEmpty ? nil : issues.joined(separator: "\n\n")
     }
 
@@ -263,10 +450,8 @@ public final class ChatSession: ObservableObject {
         messages.append(ChatMessage(role: .assistant, content: response.content))
         recordPerformance(outcome: .success, reply: response)
         clearActiveRequest()
-        do {
-            try store.saveMessages(messages)
-        } catch {
-            errorMessage = "The reply was received, but the conversation could not be saved: \(error.localizedDescription)"
+        if !saveLibrary() {
+            errorMessage = "The reply was received, but the conversation could not be saved."
         }
     }
 
@@ -276,6 +461,7 @@ public final class ChatSession: ObservableObject {
         recordPerformance(outcome: .failed)
         clearActiveRequest()
         draft = request.originalDraft
+        saveLibrary()
         let prefix = settings.provider == .chatGPT ? "Response interrupted" : "Could not send message"
         errorMessage = ["\(prefix): \(description)", recoveryError].compactMap { $0 }.joined(separator: "\n")
     }
@@ -288,6 +474,7 @@ public final class ChatSession: ObservableObject {
         draft = request.originalDraft
         errorMessage = recoveryError
         notice = cancellationNotice
+        saveLibrary()
     }
 
     private var cancellationNotice: String {
@@ -301,8 +488,7 @@ public final class ChatSession: ObservableObject {
         let response = partialReply.isEmpty ? nil : ChatMessage(role: .assistant, content: partialReply)
         interruptedTurns.append(InterruptedTurn(message: request.message, originalDraft: request.originalDraft,
             response: response, afterMessageCount: messages.count, wasCancelled: wasCancelled))
-        do { try store.save(interruptedTurns, to: "interrupted-turns.json"); return nil }
-        catch { return "The interrupted response is visible, but could not be saved: \(error.localizedDescription)" }
+        return saveLibrary() ? nil : "The interrupted response is visible, but could not be saved."
     }
 
     private func recordPerformance(outcome: RequestPerformance.Outcome, reply: ChatReply? = nil) {

@@ -58,14 +58,16 @@ conversation and agent tools. **Continue with ChatGPT** connects the account;
 **Manage usage** opens ChatGPT usage settings. An existing ChatGPT account in
 Codex on this Mac is reused. Signing out disconnects that shared account.
 
-The workspace folder is optional. Without one, the runtime uses a private,
-read-only chat workspace. Selecting a folder supplies task context; workspace
-writes are optional. Chat shows tool activity and approval controls. Stop
+The workspace folder is optional. Without one, the runtime uses a private
+chat workspace. Selecting a folder supplies task context. Commands run with full
+filesystem and network access under your macOS account, without runtime approval
+prompts. macOS permissions and connected-service scopes still apply. Chat shows
+tool activity and any service input controls. Stop
 interrupts the runtime; completed actions are not undone.
 
 Older **ChatGPT plan** and **Codex runtime** settings migrate to this one connection,
 preserving the selected model and visible conversation. Former direct-chat settings
-start with read-only execution and require confirming the displayed account before
+require confirming the displayed account before
 sending. Old helper credential files remain untouched;
 they are not imported into Codex or used as an automatic fallback.
 
@@ -91,7 +93,20 @@ messages. Replies arrive after the model finishes generating.
 - **Transmit** or **Command-Return** submits a message. Return inserts a new line.
 - **Stop** cancels the app's request and restores the prompt for editing.
   A server may continue generation after the client disconnects.
-- **New Chat** clears the saved conversation and starts with an empty context.
+- **New Chat** or **Command-N** creates a separate saved conversation in the selected workspace.
+- The chat sidebar lists that workspace's conversations, newest activity first, with search.
+  Click a chat to restore its transcript and draft; right-click to rename or delete it.
+  The sidebar button beside **Channel Open** toggles the list.
+- The **Workspace** selector below the message field switches workspaces and provides
+  **New Workspace** and **Rename Workspace**. Each workspace remembers its selected chat
+  and optional task folder. Connection Settings edits the selected workspace's folder;
+  the account, model, and reasoning setting remain shared.
+- Chat and workspace switching is disabled during generation; stop the response first.
+  Chats keep separate model context, unsent drafts, interrupted attempts, and runtime
+  thread links. The selected workspace and chat return after relaunch.
+- Existing single-chat history imports into **Personal**. Original legacy files remain
+  untouched. The new atomic `chat-library.json` stores chats, drafts, and membership;
+  `codex-<chat UUID>.json` stores each chat's runtime audit and resume link.
 - Errors preserve the prompt and completed conversation for retrying.
 
 ## Console and instruments

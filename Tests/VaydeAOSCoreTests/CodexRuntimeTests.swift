@@ -45,9 +45,12 @@ final class CodexRuntimeTests {
         let starts = log.filter { $0["method"].text == "turn/start" }
         #expect(starts.map { $0["params"]["input"].values.first?["text"].text } == ["First", "Follow-up"])
         let policy = try #require(log.first { $0["method"].text == "thread/start" })["params"]
-        #expect(policy["sandbox"].text == "read-only")
-        #expect(policy["approvalPolicy"].text == "untrusted")
+        #expect(policy["sandbox"].text == "danger-full-access")
+        #expect(policy["approvalPolicy"].text == "never")
         #expect(policy["approvalsReviewer"].text == "user")
+        let resumedPolicy = try #require(log.first { $0["method"].text == "thread/resume" })["params"]
+        #expect(resumedPolicy["sandbox"].text == "danger-full-access")
+        #expect(resumedPolicy["approvalPolicy"].text == "never")
         let audit = try String(contentsOf: directory.appendingPathComponent("codex-session.json"), encoding: .utf8)
         #expect(!audit.contains("private command output"))
     }
@@ -110,10 +113,10 @@ final class CodexRuntimeTests {
         #expect(interrupted.response?.content == "Partial café")
         #expect(interrupted.afterMessageCount == history.count)
         #expect(!interrupted.wasCancelled)
-        #expect(try store.loadMessages() == history)
+        #expect(try store.load(ChatLibrary.self, from: "chat-library.json")?.chats.first { $0.id == session.selectedChatID }?.messages == history)
         if mode == "malformedSecond" { #expect(session.errorMessage?.contains("unsupported protocol") == true) }
         if mode == "crashSecond" { #expect(session.errorMessage?.contains("status 3") == true) }
-        let attrs = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("interrupted-turns.json").path)
+        let attrs = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("chat-library.json").path)
         #expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600)
         #expect(try requests().filter { $0["method"].text == "turn/start" }.count == 2)
         runtime.shutdown()
@@ -179,6 +182,93 @@ final class CodexRuntimeTests {
         runtime.shutdown()
     }
 
+    @Test func mcpFormWaitsForUserAndSendsValidatedTypedContent() async throws {
+        let runtime = try makeRuntime(mode: "mcpForm")
+        defer { runtime.shutdown() }
+        let run = Task { try await runtime.reply(to: [ChatMessage(role: .user, content: "Use the service")], settings: configuration()) { _ in } }
+        try await wait { !runtime.prompts.isEmpty }
+        let prompt = try #require(runtime.prompts.first)
+        #expect(prompt.title == "MCP request from fixture-service")
+        #expect(prompt.elicitation?.fields.count == 4)
+        #expect(!(try requests()).contains { $0["id"].text == "mcp-1" && $0["result"] != .null })
+        let invalid = ["confirm": "true", "count": "2.5", "scope": "read", "note": "private form answer"]
+        #expect(!runtime.canSubmit(prompt, answers: invalid))
+        runtime.answer(prompt, answers: invalid)
+        runtime.answer(prompt, approve: true) // Cannot bypass a form's required fields.
+        #expect(runtime.prompts.count == 1)
+        let valid = ["confirm": "false", "count": "2", "scope": "read", "note": "private form answer"]
+        #expect(runtime.canSubmit(prompt, answers: valid))
+        runtime.answer(prompt, answers: valid)
+        _ = try await run.value
+        let response = try #require(try requests().first { $0["id"].text == "mcp-1" && $0["result"] != .null })["result"]
+        #expect(response["action"].text == "accept")
+        #expect(response["content"]["confirm"] == .bool(false))
+        #expect(response["content"]["count"] == .number(2))
+        #expect(response["content"]["scope"].text == "read")
+        runtime.answer(prompt, answers: valid)
+        #expect(try requests().filter { $0["id"].text == "mcp-1" && $0["result"] != .null }.count == 1)
+        let audit = try String(contentsOf: directory.appendingPathComponent("codex-session.json"), encoding: .utf8)
+        #expect(!audit.contains("private form answer"))
+    }
+
+    @Test(arguments: ["mcpForm", "mcpURL", "mcpEmptyForm"])
+    func mcpRequestsCanBeDeclinedWithoutGrantingAccess(mode: String) async throws {
+        let runtime = try makeRuntime(mode: mode)
+        defer { runtime.shutdown() }
+        let run = Task { try await runtime.reply(to: [ChatMessage(role: .user, content: "Use service")], settings: configuration()) { _ in } }
+        try await wait { !runtime.prompts.isEmpty }
+        let prompt = try #require(runtime.prompts.first)
+        runtime.answer(prompt, approve: false)
+        _ = try await run.value
+        let result = try #require(try requests().first { $0["id"].text == "mcp-1" && $0["result"] != .null })["result"]
+        #expect(result["action"].text == "decline")
+        #expect(result["content"] == .null)
+    }
+
+    @Test(arguments: ["mcpURL", "mcpEmptyForm"])
+    func mcpURLAndEmptyFormRequireExplicitAcceptance(mode: String) async throws {
+        let runtime = try makeRuntime(mode: mode)
+        defer { runtime.shutdown() }
+        let run = Task { try await runtime.reply(to: [ChatMessage(role: .user, content: "Use service")], settings: configuration()) { _ in } }
+        try await wait { !runtime.prompts.isEmpty }
+        let prompt = try #require(runtime.prompts.first)
+        #expect(prompt.elicitation?.url?.host == (mode == "mcpURL" ? "example.test" : nil))
+        #expect(!(try requests()).contains { $0["id"].text == "mcp-1" && $0["result"] != .null })
+        runtime.answer(prompt, approve: true)
+        _ = try await run.value
+        let result = try #require(try requests().first { $0["id"].text == "mcp-1" && $0["result"] != .null })["result"]
+        #expect(result["action"].text == "accept")
+        #expect(result["content"] == (mode == "mcpURL" ? .null : .object([:])))
+    }
+
+    @Test(arguments: ["mcpUnsupported", "mcpUnsafeURL"])
+    func unsupportedMcpRequestsRemainDeclined(mode: String) async throws {
+        let runtime = try makeRuntime(mode: mode)
+        defer { runtime.shutdown() }
+        _ = try await runtime.reply(to: [ChatMessage(role: .user, content: "Use service")], settings: configuration()) { _ in }
+        #expect(runtime.prompts.isEmpty)
+        #expect(runtime.errorMessage?.contains("unsupported form or verification") == true)
+        let result = try #require(try requests().first { $0["id"].text == "mcp-1" && $0["result"] != .null })["result"]
+        #expect(result["action"].text == "decline")
+    }
+
+    @Test func failedMcpAndDynamicToolDetailsStayVisibleButOutOfAudit() async throws {
+        let runtime = try makeRuntime(mode: "toolErrors")
+        defer { runtime.shutdown() }
+        _ = try await runtime.reply(to: [ChatMessage(role: .user, content: "Use tools")], settings: configuration()) { _ in }
+        for id in ["mcp-error", "mcp-result-error", "dynamic-error", "command-error"] {
+            let event = try #require(runtime.activity.first { $0.id == id })
+            #expect(event.status == "failed")
+            #expect(event.detail.contains("private failure detail"))
+        }
+        #expect(runtime.activity.first { $0.id == "mcp-error" }?.detail.contains("service transport failed") == true)
+        #expect(runtime.activity.first { $0.id == "command-error" }?.detail.contains("Exit code: 7") == true)
+        let audit = try String(contentsOf: directory.appendingPathComponent("codex-session.json"), encoding: .utf8)
+        #expect(!audit.contains("private failure detail"))
+        #expect(!audit.contains("private argument"))
+        #expect(!audit.contains("service transport failed"))
+    }
+
     @Test(arguments: ["failed", "crash", "malformed"])
     func failureNeverCommitsAPartialAnswer(mode: String) async throws {
         let runtime = try makeRuntime(mode: mode)
@@ -192,7 +282,7 @@ final class CodexRuntimeTests {
         #expect(session.draft == "Keep this prompt")
         #expect(session.errorMessage != nil)
         #expect(session.performanceHistory.last?.outcome == .failed)
-        let record = try #require(try LocalStore(directory: directory).load(CodexRecord.self, from: "codex-session.json"))
+        let record = try #require(try LocalStore(directory: directory).load(CodexRecord.self, from: "codex-\(session.selectedChatID.uuidString).json"))
         #expect(record.interrupted)
         runtime.shutdown()
     }
@@ -292,7 +382,7 @@ final class CodexRuntimeTests {
         session.draft = "First prompt"; session.send(); await session.sendTask?.value
         session.draft = "Follow-up"; session.send(); await session.sendTask?.value
         #expect(session.messages.map(\.content) == ["First prompt", "Final café", "Follow-up", "Final café"])
-        #expect(try store.loadMessages() == session.messages)
+        #expect(try store.load(ChatLibrary.self, from: "chat-library.json")?.chats.first { $0.id == session.selectedChatID }?.messages == session.messages)
         #expect(session.partialReply.isEmpty)
         #expect(credentials.calls == 0)
         let turns = try requests().filter { $0["method"].text == "turn/start" }
@@ -328,13 +418,14 @@ final class CodexRuntimeTests {
         runtime.shutdown()
     }
 
-    @Test func noSelectedFolderUsesPrivateReadOnlyWorkspace() async throws {
+    @Test func noSelectedFolderUsesPrivateWorkspaceWithFullAccess() async throws {
         let runtime = try makeRuntime()
         let settings = ConnectionSettings(baseURL: "", model: "", provider: .chatGPT)
         _ = try await runtime.reply(to: [ChatMessage(role: .user, content: "Chat")], settings: settings) { _ in }
         let start = try #require(try requests().first { $0["method"].text == "thread/start" })
         #expect(start["params"]["cwd"].text == directory.appendingPathComponent("Workspace").resolvingSymlinksInPath().path)
-        #expect(start["params"]["sandbox"].text == "read-only")
+        #expect(start["params"]["sandbox"].text == "danger-full-access")
+        #expect(start["params"]["approvalPolicy"].text == "never")
         #expect(start["params"]["modelProvider"].text == "openai")
         #expect(start["params"]["model"].text == "fixture-model")
         runtime.shutdown()
@@ -349,6 +440,87 @@ final class CodexRuntimeTests {
         #expect(!runtime.isSignedIn)
         #expect(try requests().allSatisfy { $0["method"].text != "turn/start" })
         runtime.shutdown()
+    }
+
+    @Test func switchingChatsUsesTheirOwnThreadLinksAndResumesTheOriginal() async throws {
+        let runtime = try makeRuntime(mode: "multipleThreads")
+        defer { runtime.shutdown() }
+        let store = LocalStore(directory: directory)
+        let session = ChatSession(store: store, codex: runtime)
+        try session.saveSettings(configuration(), apiKey: "")
+        let first = session.selectedChatID
+        session.draft = "First context"; session.send(); await session.sendTask?.value
+        #expect(runtime.threadID == "thread-1")
+        session.newChat()
+        #expect(runtime.threadID == nil)
+        session.draft = "Second context"; session.send(); await session.sendTask?.value
+        #expect(runtime.threadID == "thread-2")
+        session.selectChat(first)
+        #expect(runtime.threadID == "thread-1")
+        session.draft = "First follow-up"; session.send(); await session.sendTask?.value
+        let calls = try requests()
+        #expect(calls.filter { $0["method"].text == "thread/start" }.count == 2)
+        let resumed = try #require(calls.last { $0["method"].text == "thread/resume" })
+        #expect(resumed["params"]["threadId"].text == "thread-1")
+        #expect(session.messages.map(\.content) == ["First context", "Final café", "First follow-up", "Final café"])
+        let restoredRuntime = try makeRuntime()
+        defer { restoredRuntime.shutdown() }
+        let restored = ChatSession(store: store, codex: restoredRuntime)
+        #expect(restored.codex.threadID == "thread-1")
+    }
+
+    @Test(arguments: ["appDiscoveryFailure", "mcpDiscoveryFailure"])
+    func integrationDiscoveryRetainsSuccessfulCatalogWhenOtherCatalogFails(mode: String) async throws {
+        let runtime = try makeRuntime(mode: mode)
+        defer { runtime.shutdown() }
+        await runtime.refresh(settings: configuration())
+        #expect(runtime.isConnected)
+        #expect(!runtime.integrations.isEmpty)
+        #expect(runtime.errorMessage?.contains(mode == "appDiscoveryFailure" ? "Installed app discovery failed" : "MCP server discovery failed") == true)
+        #expect(runtime.integrations.first?.id == (mode == "appDiscoveryFailure" ? "mcp:filesystem" : "app:fixture"))
+        await runtime.refresh(settings: configuration())
+        #expect(runtime.integrations.count == 2)
+        #expect(runtime.errorMessage == nil)
+    }
+
+    @Test func cancellingMcpFormNeverSendsAnAcceptance() async throws {
+        let runtime = try makeRuntime(mode: "mcpForm")
+        defer { runtime.shutdown() }
+        let run = Task { try await runtime.reply(to: [ChatMessage(role: .user, content: "Use service")], settings: configuration()) { _ in } }
+        try await wait { !runtime.prompts.isEmpty }
+        runtime.cancel()
+        do { _ = try await run.value; Issue.record("Expected cancellation") }
+        catch { #expect(error is CancellationError) }
+        #expect(runtime.prompts.isEmpty)
+        #expect(!(try requests()).contains { $0["id"].text == "mcp-1" && $0["result"]["action"].text == "accept" })
+    }
+
+    /// No model request or file writes: exercise one configured read-only MCP tool
+    /// through the same Swift transport and environment as the packaged app.
+    @Test func bundledMCPReadOnlySmokeWhenExplicitlyEnabled() async throws {
+        guard let path = ProcessInfo.processInfo.environment["VAYDEAOS_CODEX_SMOKE"],
+              ProcessInfo.processInfo.environment["VAYDEAOS_CODEX_MCP"] == "1" else { return }
+        let process = CodexProcess(executable: URL(fileURLWithPath: path))
+        defer { process.stop() }
+        try await process.connect()
+        let thread = try await process.request("thread/start", .object([
+            "cwd": .string(directory.path), "modelProvider": .string("openai"),
+            "sandbox": .string("read-only"), "approvalPolicy": .string("untrusted"),
+            "approvalsReviewer": .string("user")
+        ]))
+        let id = try #require(thread["thread"]["id"].text)
+        let catalog = try await process.request("mcpServerStatus/list", .object([
+            "threadId": .string(id), "limit": .number(100)
+        ]))
+        let obsidian = try #require(catalog["data"].values.first { $0["name"].text == "obsidian" })
+        #expect(obsidian["tools"]["list_allowed_directories"] != .null)
+        let result = try await process.request("mcpServer/tool/call", .object([
+            "threadId": .string(id), "server": .string("obsidian"),
+            "tool": .string("list_allowed_directories"), "arguments": .object([:])
+        ]))
+        #expect(result["isError"] != .bool(true))
+        #expect(result["content"].values.contains { !($0["text"].text ?? "").isEmpty })
+        print("Codex MCP proof: Obsidian list_allowed_directories completed through the app transport; no model request.")
     }
 
     @Test func bundledRuntimeSmokeWhenExplicitlyEnabled() async throws {
@@ -424,6 +596,9 @@ import json,os,sys
 mode=os.environ['FIXTURE_MODE']
 turn=0
 thread='thread-1'
+thread_count=0
+app_reads=0
+mcp_reads=0
 def out(d):
  data=(json.dumps(d,ensure_ascii=False)+'\n').encode()
  # Exercise fragmented UTF-8 and JSON protocol frames.
@@ -442,11 +617,16 @@ for line in sys.stdin:
  with open(os.environ['FIXTURE_LOG'],'a') as f:f.write(json.dumps(d)+'\n')
  method=d.get('method');rid=d.get('id');params=d.get('params',{})
  if not method:
-  if rid in ['approve-1','input-1']:complete()
+  if rid in ['approve-1','input-1','mcp-1']:complete()
   continue
  if method=='initialize':out({'id':rid,'result':{'userAgent':'fixture'}})
  elif method=='initialized':pass
  elif method=='thread/start' or method=='thread/resume':
+  if mode=='multipleThreads':
+   if method=='thread/start':
+    thread_count+=1
+    thread='thread-'+str(thread_count)
+   else:thread=params['threadId']
   out({'id':rid,'result':{'thread':{'id':thread}}})
  elif method=='turn/start':
   turn+=1
@@ -481,6 +661,20 @@ for line in sys.stdin:
    event('item/started',{'item':{'id':'approval-tool','type':'commandExecution','command':'touch sample.txt','status':'inProgress'}})
    out({'id':'stale','method':'item/commandExecution/requestApproval','params':{'threadId':'different-thread','turnId':'old'}})
    out({'id':'approve-1','method':'item/commandExecution/requestApproval','params':{'threadId':thread,'turnId':'turn-'+str(turn),'itemId':'approval-tool','command':'touch sample.txt','cwd':params.get('cwd','/tmp')}})
+  elif mode.startswith('mcp'):
+   request={'threadId':thread,'turnId':'turn-'+str(turn),'serverName':'fixture-service','message':'Confirm the requested service action','mode':'form','requestedSchema':{'type':'object','properties':{},'required':[]}}
+   if mode=='mcpForm':
+    request['requestedSchema']={'type':'object','properties':{'confirm':{'type':'boolean'},'count':{'type':'integer','minimum':1,'maximum':5},'scope':{'type':'string','oneOf':[{'const':'read','title':'Read only'},{'const':'write','title':'Write'}]},'note':{'type':'string','minLength':3,'maxLength':100}},'required':['confirm','count','scope']}
+   elif mode in ['mcpURL','mcpUnsafeURL']:
+    request.update({'mode':'url','url':'https://example.test/verify' if mode=='mcpURL' else 'file:///etc/hosts','elicitationId':'flow-1'})
+   elif mode=='mcpUnsupported':request['requestedSchema']['properties']={'nested':{'type':'object'}}
+   out({'id':'mcp-1','method':'mcpServer/elicitation/request','params':request})
+  elif mode=='toolErrors':
+   event('item/completed',{'item':{'id':'mcp-error','type':'mcpToolCall','server':'fixture','tool':'read','status':'failed','arguments':{'path':'private argument'},'error':{'message':'service transport failed: private failure detail'}}})
+   event('item/completed',{'item':{'id':'mcp-result-error','type':'mcpToolCall','server':'fixture','tool':'read','status':'completed','result':{'isError':True,'content':[{'type':'text','text':'private failure detail'}]}}})
+   event('item/completed',{'item':{'id':'dynamic-error','type':'dynamicToolCall','tool':'fixture','status':'completed','success':False,'contentItems':[{'type':'inputText','text':'private failure detail'}]}})
+   event('item/completed',{'item':{'id':'command-error','type':'commandExecution','command':'fixture','status':'completed','exitCode':7,'aggregatedOutput':'private failure detail'}})
+   complete()
   elif mode=='input':
    out({'id':'unsupported','method':'unknown/permission','params':{'threadId':thread}})
    out({'id':'input-1','method':'tool/requestUserInput','params':{'threadId':thread,'turnId':'turn-'+str(turn),'questions':[{'id':'choice','question':'Approve service action?','options':[{'label':'Accept'},{'label':'Decline'}]}]}})
@@ -488,7 +682,14 @@ for line in sys.stdin:
  elif method=='turn/interrupt':out({'id':rid,'result':{}})
  elif method=='account/read':out({'id':rid,'result':{'account':None if mode=='signedOut' else {'type':'chatgpt','email':'fixture@example.test','planType':'plus'}}})
  elif method=='model/list':out({'id':rid,'result':{'data':[{'id':'fixture-model','model':'fixture-model','displayName':'Fixture model','isDefault':True}]}})
- elif method=='mcpServerStatus/list':out({'id':rid,'result':{'data':[{'name':'filesystem','authStatus':'unsupported','tools':{'read_file':{'name':'read_file'}}}]}})
+ elif method=='mcpServerStatus/list':
+  mcp_reads+=1
+  if mode=='mcpDiscoveryFailure' and mcp_reads==1:out({'id':rid,'error':{'code':-32603,'message':'fixture unavailable'}})
+  else:out({'id':rid,'result':{'data':[{'name':'filesystem','authStatus':'unsupported','tools':{'read_file':{'name':'read_file'}}}]}})
+ elif method=='app/installed':
+  app_reads+=1
+  if mode=='appDiscoveryFailure' and app_reads==1:out({'id':rid,'error':{'code':-32603,'message':'fixture unavailable'}})
+  else:out({'id':rid,'result':{'apps':[{'id':'fixture','enabled':True,'callable':True}]}})
  else:out({'id':rid,'result':{}})
 """#
 }
