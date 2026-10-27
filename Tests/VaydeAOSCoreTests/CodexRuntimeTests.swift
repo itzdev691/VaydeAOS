@@ -73,6 +73,27 @@ final class CodexRuntimeTests {
         runtime.shutdown()
     }
 
+    @Test func tokenUsageUsesLastModelResponseIgnoresOtherTurnsAndResetsForNextRequest() async throws {
+        let runtime = try makeRuntime(mode: "tokenUsage")
+        defer { runtime.shutdown() }
+        let user = ChatMessage(role: .user, content: "First")
+        let first = try await runtime.reply(to: [user], settings: configuration()) { _ in }
+        #expect(first.inputTokens == 120)
+        #expect(first.outputTokens == 35)
+        let second = try await runtime.reply(to: [user, ChatMessage(role: .assistant, content: first.content),
+            ChatMessage(role: .user, content: "Next")], settings: configuration()) { _ in }
+        #expect(second.inputTokens == nil)
+        #expect(second.outputTokens == nil)
+    }
+
+    @Test func malformedTokenUsageRemainsUnavailable() async throws {
+        let runtime = try makeRuntime(mode: "invalidTokenUsage")
+        defer { runtime.shutdown() }
+        let reply = try await runtime.reply(to: [ChatMessage(role: .user, content: "First")], settings: configuration()) { _ in }
+        #expect(reply.inputTokens == nil)
+        #expect(reply.outputTokens == nil)
+    }
+
     @Test func stdoutBurstSurvivesASlowConsumer() async throws {
         let runtime = try makeRuntime(mode: "burst")
         defer { runtime.shutdown() }
@@ -790,6 +811,12 @@ def out(d):
  for i in range(0,len(data),7):os.write(1,data[i:i+7])
 def event(method,params):out({'method':method,'params':dict({'threadId':thread,'turnId':'turn-'+str(turn)},**params)})
 def complete():
+ if mode=='tokenUsage' and turn==1:
+  event('thread/tokenUsage/updated',{'tokenUsage':{'last':{'inputTokens':120,'outputTokens':35},'total':{'inputTokens':9000,'outputTokens':1500}}})
+  event('thread/tokenUsage/updated',{'threadId':'different-thread','tokenUsage':{'last':{'inputTokens':999,'outputTokens':999}}})
+  event('thread/tokenUsage/updated',{'turnId':'old-turn','tokenUsage':{'last':{'inputTokens':888,'outputTokens':888}}})
+ if mode=='invalidTokenUsage':
+  event('thread/tokenUsage/updated',{'tokenUsage':{'last':{'inputTokens':-1,'outputTokens':1.5}}})
  event('item/started',{'item':{'id':'tool-'+str(turn),'type':'commandExecution','command':'cat proof.txt','status':'inProgress'}})
  event('item/completed',{'item':{'id':'tool-'+str(turn),'type':'commandExecution','command':'cat proof.txt','aggregatedOutput':'private command output','status':'completed'}})
  event('item/agentMessage/delta',{'itemId':'comment-'+str(turn),'delta':'Working'})

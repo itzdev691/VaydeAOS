@@ -87,7 +87,6 @@ struct SessionSidebar: View {
     @ObservedObject var telemetry: SystemTelemetry
     @Binding var showingConnectionSettings: Bool
     @State private var showAllInterfaces = false
-    @State private var reasoningError: String?
 
     private var interfaces: [SystemTelemetry.NetworkInterface] {
         let active = telemetry.interfaces.filter { $0.isUp && !$0.addresses.isEmpty }.sorted {
@@ -117,7 +116,7 @@ struct SessionSidebar: View {
                         Rectangle().fill(Console.line).frame(height: 1)
                         InstrumentRow(label: "REQUEST", value: session.isSending ? "RUNNING" : session.errorMessage != nil ? "ATTENTION" : "STANDBY", color: session.errorMessage != nil ? Console.amber : Console.green)
                         InstrumentRow(label: "CONTEXT", value: "\(session.messages.count) messages")
-                        reasoningControl
+                        SessionReasoningControl(session: session)
                         Button { showingConnectionSettings = true } label: {
                             HStack { Text("CONFIGURE UPLINK"); Spacer(); Image(systemName: "arrow.up.right") }
                         }.buttonStyle(ConsoleButtonStyle()).disabled(session.isSending)
@@ -160,7 +159,13 @@ struct SessionSidebar: View {
         }
     }
 
-    private var reasoningControl: some View {
+}
+
+struct SessionReasoningControl: View {
+    @ObservedObject var session: ChatSession
+    @State private var reasoningError: String?
+
+    var body: some View {
         let efforts = session.modelSelection.availableEfforts
         return VStack(alignment: .leading, spacing: 6) {
             InstrumentRow(label: "REASONING MODE", value: session.settings.reasoningEffort.label.uppercased(), color: Console.blue)

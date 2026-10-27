@@ -24,28 +24,28 @@ enum Console {
         return Image(systemName: "photo")
     }
 
-    // Experimental VaydeNet palette, sampled from the live site stylesheet.
-    // https://vaydenet.duckdns.org/css/tokens.css
-    // Navy foundation / blue structure / restrained red accents.
+    // Logo palette: dominant blue family, supporting white, restrained red accents.
+    // Brighter blue is reserved for selected, hovered, and focused controls.
     private static func hex(_ value: UInt32) -> Color {
         Color(red: Double((value >> 16) & 255) / 255,
               green: Double((value >> 8) & 255) / 255,
               blue: Double(value & 255) / 255)
     }
-    static let background = hex(0x070b18)
-    static let panel = hex(0x0b1020)
-    static let raised = hex(0x172554)
-    static let blue = hex(0x60a5fa)
-    static let blueStrong = hex(0x1d4ed8)
-    static let blueBright = hex(0x3b82f6)
-    static let red = hex(0xff4c5b)
-    static let redStrong = hex(0xff2235)
-    static let green = hex(0x34d399)
-    static let amber = hex(0xe8ba73)
-    static let white = hex(0xf8fbff)
-    static let text = hex(0xdbeafe)
-    static let muted = hex(0x94a3b8)
-    static let line = blue.opacity(0.16)
+    static let background = hex(0x050b18)
+    static let panel = hex(0x09162e)
+    static let raised = hex(0x0d2852)
+    static let blue = hex(0x007bfd)
+    static let border = hex(0x1c4380)
+    static let blueStrong = hex(0x005dd7)
+    static let blueBright = hex(0x3b98ff)
+    static let red = hex(0xff3e32)
+    static let redStrong = hex(0xf52c24)
+    static let green = hex(0x00e997)
+    static let amber = hex(0xffdf00)
+    static let white = hex(0xfdfdfd)
+    static let text = hex(0xf1f4fa)
+    static let muted = hex(0xb0bacb)
+    static let line = hex(0x1c3b6b).opacity(0.75)
     static let brandGradient = LinearGradient(
         stops: [.init(color: blueStrong, location: 0),
                 .init(color: blueBright, location: 0.72),
@@ -97,21 +97,31 @@ struct ConsolePanel<Content: View>: View {
 
 struct ConsoleButtonStyle: ButtonStyle {
     var prominent = false
+    var compact = false
     func makeBody(configuration: Configuration) -> some View {
-        ConsoleButtonBody(configuration: configuration, prominent: prominent)
+        ConsoleButtonBody(configuration: configuration, prominent: prominent, compact: compact)
     }
     private struct ConsoleButtonBody: View {
         let configuration: Configuration
         let prominent: Bool
+        let compact: Bool
         @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.isFocused) private var focused
         @State private var hovering = false
         var body: some View {
             configuration.label
-                .font(Console.mono(11, weight: .medium))
-                .padding(.horizontal, 12).padding(.vertical, 9)
-                .foregroundStyle(prominent ? Console.white : Console.blue)
-                .background(prominent ? Console.blueStrong : Console.raised.opacity(hovering ? 0.75 : 0.35))
-                .overlay(Rectangle().strokeBorder(Console.blue.opacity(hovering ? 0.8 : 0.3), lineWidth: 1))
+                .font(Console.mono(compact ? 9 : 11, weight: .medium))
+                .padding(.horizontal, compact ? 10 : 12).padding(.vertical, compact ? 0 : 9)
+                .foregroundStyle(Console.white)
+                .background {
+                    RoundedRectangle(cornerRadius: compact ? 3 : 0)
+                        .fill(prominent ? Console.blueStrong : Console.raised.opacity(hovering || focused ? 0.75 : 0.25))
+                    if hovering || focused {
+                        RoundedRectangle(cornerRadius: compact ? 3 : 0).fill(Console.blueBright.opacity(0.10))
+                    }
+                }
+                .overlay(RoundedRectangle(cornerRadius: compact ? 3 : 0)
+                    .strokeBorder(hovering || focused ? Console.blueBright.opacity(0.8) : Console.border, lineWidth: 1))
                 .overlay(alignment: .bottom) {
                     if prominent { Rectangle().fill(Console.brandGradient).frame(height: 2) }
                 }
@@ -125,13 +135,13 @@ struct ConsoleGrid: View {
     var body: some View {
         Canvas { context, size in
             var path = Path()
-            for x in stride(from: CGFloat(0), to: size.width, by: 32) {
+            for x in stride(from: CGFloat(0), to: size.width, by: 30) {
                 path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height))
             }
-            for y in stride(from: CGFloat(0), to: size.height, by: 32) {
+            for y in stride(from: CGFloat(0), to: size.height, by: 30) {
                 path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: size.width, y: y))
             }
-            context.stroke(path, with: .color(Console.blue.opacity(0.025)), lineWidth: 0.5)
+            context.stroke(path, with: .color(Console.blueBright.opacity(0.10)), lineWidth: 0.5)
         }
         .allowsHitTesting(false).accessibilityHidden(true)
     }

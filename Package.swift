@@ -8,6 +8,9 @@ let package = Package(
         .executable(name: "VaydeAOS", targets: ["VaydeAOS"]),
         .library(name: "VaydeAOSCore", targets: ["VaydeAOSCore"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0"),
+    ],
     targets: [
         .target(
             name: "VaydeAOSCore",
@@ -15,7 +18,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "VaydeAOS",
-            dependencies: ["VaydeAOSCore"],
+            dependencies: ["VaydeAOSCore", .product(name: "SwiftTerm", package: "SwiftTerm")],
             resources: [.process("Assets")],
             linkerSettings: [
                 .linkedFramework("SwiftUI"),

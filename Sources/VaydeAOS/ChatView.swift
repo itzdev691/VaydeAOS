@@ -6,80 +6,91 @@ struct ChatView: View {
     @ObservedObject var session: ChatSession
     @Binding var showingConnectionSettings: Bool
     @StateObject private var telemetry = SystemTelemetry()
+    @StateObject private var projectConsoles = ProjectConsoleRegistry()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.workspaceBootReady) private var bootReady
     @State private var bootStep = 0
     @FocusState private var composerFocused: Bool
-    @State private var workspaceMode = WorkspaceMode.workspace
     @State private var chatPresented = false
     @State private var channelWorkspaceID: UUID?
+    @Namespace private var workspacePanelAnimation
+    private var workspacePanelPresented: Bool { session.workspaceConsole.panelExpanded && !chatPresented }
     private var chatSidebarVisible: Bool { session.workspaceConsole.sidebarVisible }
     @State private var lastInteraction = Date()
-    private var autoIdle: Bool { session.workspaceConsole.autoIdle }
+    @State private var idlePresented = false
+    @State private var resumeComposerFocus = false
     private let idleTicker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-
-    private enum WorkspaceMode: String, CaseIterable {
-        case workspace = "CONSOLE", network = "NETWORK", focus = "FOCUS"
-    }
 
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                header.workspaceBoot(stage: 0, label: "DISPLAY")
-                navigation.workspaceBoot(stage: 1, label: "NAVIGATION")
+                if idlePresented { idleHeader }
+                else {
+                    header.workspaceBoot(stage: 0, label: "DISPLAY")
+                    navigation.workspaceBoot(stage: 1, label: "NAVIGATION")
+                }
                 HStack(alignment: .top, spacing: 12) {
-                    if chatSidebarVisible && workspaceMode != .focus {
+                    if chatSidebarVisible {
                         ChatSidebar(session: session, openChat: { openChat() },
                                     openConsole: { openConsole() }, isChatOpen: chatPresented)
-                            .frame(width: geometry.size.width < 1250 ? 208 : 238)
+                            .frame(width: 208)
                             .workspaceBoot(stage: 2, label: "WORKSPACES")
                     }
                     ZStack {
-                        // Keep the dashboard mounted so timers and widget state survive chat.
-                        ScrollView(showsIndicators: false) {
-                            VStack(spacing: 12) {
-                                workspaceBanner.workspaceBoot(stage: 3, label: "WORKSPACE")
-                                workspaceOverview
-                                activityGraphPanel.frame(height: workspaceMode == .network ? 300 : 230)
-                                WorkspaceWidgets(session: session, isActive: !chatPresented,
-                                                 interrupt: { openChat(prompt: $0) })
-                                    .id(session.selectedWorkspaceID)
-                            }
-                        }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .opacity(chatPresented ? 0 : 1)
-                        .allowsHitTesting(!chatPresented)
-                        .accessibilityHidden(chatPresented)
-                        if chatPresented {
-                            VStack(spacing: 12) {
-                                HStack {
-                                    Circle().fill(Console.green).frame(width: 5, height: 5)
-                                    Button { session.updateWorkspaceConsole { $0.sidebarVisible.toggle() } } label: {
-                                        Image(systemName: "sidebar.left")
-                                    }.buttonStyle(.plain).accessibilityLabel("Toggle chat sidebar")
-                                        .help("Show or hide chats")
-                                    Text("CHANNEL OPEN").tracking(1.2)
-                                    Spacer()
-                                    Button { openConsole() } label: {
-                                        Label("WORKSPACE CONSOLE", systemImage: "square.grid.2x2")
-                                    }.buttonStyle(ConsoleButtonStyle()).help("Open this workspace console; keep the conversation and draft")
-                                }.font(Console.mono(9)).foregroundStyle(Console.blue)
-                                conversationPanel
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .transition(.opacity)
+                        ZStack {
+                            ProjectConsoleView(session: session, telemetry: telemetry,
+                                               controller: projectConsoles.console(for: session.selectedWorkspaceID),
+                                               openChat: { openChat() }, openModelActivity: openWorkspacePanel)
+                                .id(session.selectedWorkspaceID)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .opacity(chatPresented ? 0 : 1)
+                                .allowsHitTesting(!chatPresented)
+                                .accessibilityHidden(chatPresented)
+                                .overlayPreferenceValue(AskVaydeBoundsKey.self) { anchor in
+                                    GeometryReader { panelGeometry in
+                                        let bounds = CGRect(origin: .zero, size: panelGeometry.size)
+                                        let origin = anchor.map { panelGeometry[$0] } ?? bounds
+                                        let frame = chatPresented ? bounds : origin
+                                        chatChannel
+                                            .frame(width: frame.width, height: frame.height)
+                                            .clipped()
+                                            .offset(x: frame.minX, y: frame.minY)
+                                            .opacity(chatPresented ? 1 : 0)
+                                            .allowsHitTesting(chatPresented)
+                                            .disabled(!chatPresented)
+                                            .accessibilityHidden(!chatPresented)
+                                    }
+                                }
+                        }
+                        .opacity(workspacePanelPresented ? 0 : 1)
+                        .allowsHitTesting(!workspacePanelPresented)
+                        .accessibilityHidden(workspacePanelPresented)
+                        if workspacePanelPresented {
+                            WorkspacePanel(session: session, telemetry: telemetry,
+                                           showingConnectionSettings: $showingConnectionSettings,
+                                           animation: workspacePanelAnimation, close: closeWorkspacePanel)
+                                .transition(.opacity)
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if geometry.size.width >= 1250 && workspaceMode != .focus {
-                        SessionSidebar(session: session, telemetry: telemetry, showingConnectionSettings: $showingConnectionSettings)
-                            .frame(width: 238)
-                            .workspaceBoot(stage: 3, label: "SESSION")
-                    }
                 }
-                .padding(16)
+                .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.86),
+                           value: session.workspaceConsole.panelExpanded)
+                .opacity(idlePresented ? 0 : 1)
+                .allowsHitTesting(!idlePresented)
+                .accessibilityHidden(idlePresented)
+                .overlay {
+                    IdleDashboardView(session: session, telemetry: telemetry,
+                                      isActive: idlePresented && scenePhase == .active)
+                        .opacity(idlePresented ? 1 : 0)
+                        .allowsHitTesting(idlePresented)
+                        .accessibilityHidden(!idlePresented)
+                }
+                .padding(.horizontal, 15).padding(.vertical, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                footer.workspaceBoot(stage: 10, label: "STATUS BAR")
+                if idlePresented { idleFooter }
+                else { footer.workspaceBoot(stage: 10, label: "STATUS BAR") }
             }
             .background {
                 Console.background
@@ -108,109 +119,123 @@ struct ChatView: View {
         .foregroundStyle(Console.text)
         .tint(Console.blue)
         .preferredColorScheme(.dark)
-        .background(WorkspaceInputMonitor(onActivity: { lastInteraction = Date() }, onTyping: { text in
-            guard bootReady, (reduceMotion || bootStep == 11), !chatPresented, !showingConnectionSettings else { return false }
-            openChat()
-            session.draft += text
-            return true
+        .background(WorkspaceInputMonitor(onActivity: { event in
+            if idlePresented && event.type != .keyDown { return false }
+            return registerInteraction()
         }))
         .background {
             Button("Interrupt") { openChat() }.keyboardShortcut("k", modifiers: .command).hidden()
         }
         .onExitCommand {
-            if chatPresented {
+            if workspacePanelPresented {
+                closeWorkspacePanel()
+            } else if chatPresented {
                 if session.isSending { session.stop() } else { openConsole() }
             }
         }
         .onReceive(idleTicker) { date in
-            if autoIdle, chatPresented, !showingConnectionSettings, !session.isSending,
-               session.draft.isEmpty, session.errorMessage == nil, date.timeIntervalSince(lastInteraction) >= 60 {
-                openConsole()
-            }
+            guard bootReady, reduceMotion || bootStep == 11, scenePhase == .active,
+                  !idlePresented, !showingConnectionSettings, NSApp.modalWindow == nil,
+                  NSApp.keyWindow?.sheetParent == nil,
+                  NSApp.keyWindow?.sheets.isEmpty == true, !session.isSending,
+                  session.codex.prompts.isEmpty,
+                  date.timeIntervalSince(lastInteraction) >= 15 else { return }
+            resumeComposerFocus = composerFocused
+            composerFocused = false
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) { idlePresented = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .vaydeShowIdle)) { _ in
+            guard !session.isSending, !showingConnectionSettings, session.codex.prompts.isEmpty else { return }
+            resumeComposerFocus = composerFocused
+            composerFocused = false
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) { idlePresented = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .vaydeOpenChat)) { _ in openChat() }
         .onAppear { telemetry.start() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            projectConsoles.shutdown()
+        }
         .onDisappear { telemetry.stop() }
         .onChange(of: scenePhase) { phase in
             if phase == .background { telemetry.stop() } else { telemetry.start() }
+            if phase == .active { _ = registerInteraction() }
         }
         .onChange(of: session.selectedWorkspaceID) { _ in
             if channelWorkspaceID != session.selectedWorkspaceID {
                 composerFocused = false
                 chatPresented = false
             }
-            workspaceMode = .workspace
-            lastInteraction = Date()
+            _ = registerInteraction()
         }
         .onChange(of: session.isSending) { sending in
-            lastInteraction = Date()
+            _ = registerInteraction()
             record(sending ? "Model request started" : "Model request finished")
             if !sending { openChat() }
         }
         .onChange(of: session.errorMessage) { error in
             if error != nil, channelWorkspaceID == session.selectedWorkspaceID {
+                _ = registerInteraction()
                 record("Model channel needs attention")
             }
         }
         .onChange(of: showingConnectionSettings) { showing in
+            _ = registerInteraction()
             if !showing && chatPresented { composerFocused = true }
         }
     }
 
-    private var workspaceBanner: some View {
-        HStack(alignment: .center, spacing: 18) {
-            ZStack {
-                Circle().stroke(Console.blue.opacity(0.15), lineWidth: 1).frame(width: 54, height: 54)
-                Circle().stroke(Console.blue.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [2, 5])).frame(width: 42, height: 42)
-                Image(systemName: "waveform.path").font(.system(size: 19, weight: .light)).foregroundStyle(Console.blue)
-            }.accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(session.selectedWorkspace.name.uppercased()).lineLimit(1).truncationMode(.middle).font(Console.mono(21, weight: .light)).tracking(2)
-                Text(session.workspaceDirectory.path).textSelection(.enabled).lineLimit(2)
-                    .font(Console.mono(10)).foregroundStyle(Console.muted)
-            }
-            Spacer(minLength: 0)
-            Toggle("AUTO IDLE", isOn: Binding(get: { autoIdle }, set: { value in
-                session.updateWorkspaceConsole { $0.autoIdle = value }
-            })).toggleStyle(.switch).controlSize(.mini)
-                .font(Console.mono(8)).fixedSize().help("Return to idle after 60 seconds with no input, unsent draft, error, or active request")
-        }
-        .padding(18).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Console.raised.opacity(0.25)).overlay(Rectangle().strokeBorder(Console.line, lineWidth: 1))
+    /// Wake input dismisses the ambient screen before it can activate a hidden control.
+    @discardableResult
+    private func registerInteraction() -> Bool {
+        lastInteraction = Date()
+        guard idlePresented else { return false }
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) { idlePresented = false }
+        if resumeComposerFocus && chatPresented { composerFocused = true }
+        resumeComposerFocus = false
+        return true
     }
 
-    private var workspaceOverview: some View {
-        ConsolePanel(title: "WORKSPACE CHATS", index: "WS", status: "\(session.workspaceChats.count) SAVED") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Button { session.newChat(); openChat() } label: {
-                        Label("NEW CHAT", systemImage: "square.and.pencil")
-                    }.buttonStyle(ConsoleButtonStyle()).disabled(!session.canOrganizeChats)
-                    Button { openChat() } label: {
-                        Label("CONTINUE CHAT", systemImage: "arrow.up.right")
-                    }.buttonStyle(ConsoleButtonStyle())
-                    Spacer()
-                    Text(session.isSending ? "REQUEST RUNNING" : "READY")
-                        .font(Console.mono(9)).foregroundStyle(session.isSending ? Console.amber : Console.muted)
-                }
-                if let error = session.errorMessage {
-                    Text(error).font(Console.mono(10)).foregroundStyle(Console.amber)
-                }
-                ForEach(session.workspaceChats.prefix(3)) { chat in
-                    Button {
-                        session.selectChat(chat.id)
-                        openChat()
-                    } label: {
-                        HStack {
-                            Text(chat.title).lineLimit(1)
-                            Spacer()
-                            Text(chat.draft.isEmpty ? "\(chat.messages.count) messages" : "Draft saved")
-                                .foregroundStyle(Console.muted)
-                        }.font(Console.mono(10)).frame(maxWidth: .infinity, alignment: .leading)
-                    }.buttonStyle(.plain).disabled(!session.canOrganizeChats)
-                }
-            }.padding(14)
-        }
+    private var idleHeader: some View {
+        HStack(spacing: 18) {
+            Rectangle().fill(Console.red).frame(width: 2, height: 28)
+            Console.image("vayde-mark", extension: "png").resizable().scaledToFit().frame(width: 26, height: 26)
+            Text("VAYDE AOS").font(Console.mono(18, weight: .light)).tracking(3)
+            Rectangle().fill(Console.blueBright).frame(width: 1, height: 23)
+            Text("VAYDENET").font(Console.mono(12)).tracking(2).foregroundStyle(Console.blueBright)
+            Spacer()
+            Text(session.selectedWorkspace.name.uppercased()).font(Console.mono(12)).tracking(2)
+                .foregroundStyle(Console.blueBright).lineLimit(1)
+            Spacer()
+            Button { _ = registerInteraction() } label: {
+                Text("IDLE  —").font(Console.mono(10)).tracking(2).foregroundStyle(Console.blueBright)
+            }.buttonStyle(.plain).accessibilityLabel("Resume workspace")
+            Rectangle().fill(Console.red).frame(width: 2, height: 28)
+        }.padding(.horizontal, 15).frame(height: 48).background(IdlePalette.background)
+            .overlay(alignment: .bottom) { Rectangle().fill(Console.blue).frame(height: 0.6).padding(.horizontal, 15) }
+    }
+
+    private var idleFooter: some View {
+        HStack {
+            Rectangle().fill(Console.red).frame(width: 2, height: 26)
+            Text("—  AMBIENT DISPLAY").tracking(2)
+            Spacer()
+            Button { _ = registerInteraction() } label: { Text("PRESS ANY KEY TO RESUME  —").tracking(2) }
+                .buttonStyle(.plain)
+            Rectangle().fill(Console.red).frame(width: 2, height: 26)
+        }.font(Console.mono(9)).foregroundStyle(Console.blueBright).padding(.horizontal, 15).frame(height: 34)
+            .background(Console.panel)
+            .overlay(alignment: .top) { Rectangle().fill(Console.blue).frame(height: 0.6).padding(.horizontal, 15) }
+    }
+
+    private func openWorkspacePanel() {
+        composerFocused = false
+        _ = registerInteraction()
+        session.updateWorkspaceConsole { $0.panelExpanded = true }
+    }
+
+    private func closeWorkspacePanel() {
+        _ = registerInteraction()
+        session.updateWorkspaceConsole { $0.panelExpanded = false }
     }
 
     private func openChat(prompt: String? = nil) {
@@ -218,17 +243,23 @@ struct ChatView: View {
         if let prompt {
             session.draft = session.draft.isEmpty ? prompt : session.draft + "\n\n" + prompt
         }
-        lastInteraction = Date()
+        _ = registerInteraction()
         if !chatPresented { record("Command channel opened") }
-        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) { chatPresented = true }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) {
+            if session.workspaceConsole.panelExpanded { closeWorkspacePanel() }
+            chatPresented = true
+        }
         DispatchQueue.main.async { composerFocused = true }
     }
 
     private func openConsole() {
+        _ = registerInteraction()
         channelWorkspaceID = nil
         composerFocused = false
-        if workspaceMode == .focus { workspaceMode = .workspace }
-        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { chatPresented = false }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+            if session.workspaceConsole.panelExpanded { closeWorkspacePanel() }
+            chatPresented = false
+        }
         record("Workspace console opened")
     }
 
@@ -263,33 +294,29 @@ struct ChatView: View {
             .buttonStyle(ConsoleButtonStyle()).padding(.leading, 12)
             .disabled(session.isSending).help("Connection settings (Command-comma)").accessibilityLabel("Connection settings")
         }
-        .padding(.horizontal, 22).frame(height: 80)
+        .padding(.horizontal, 22).frame(height: 66)
     }
 
     private var navigation: some View {
         HStack(spacing: 0) {
-            ForEach(WorkspaceMode.allCases, id: \.self) { mode in
-                Button {
-                    workspaceMode = mode
-                    if mode == .focus { openChat() } else { openConsole() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Text(mode == .workspace ? "01" : mode == .network ? "02" : "03").foregroundStyle(Console.muted)
-                        Text(mode.rawValue).tracking(1.5)
-                    }
-                    .font(Console.mono(10, weight: .medium)).padding(.horizontal, 20)
-                    .frame(height: 41)
-                    .foregroundStyle(workspaceMode == mode ? Console.blue : Console.muted)
-                    .background(workspaceMode == mode ? Console.blue.opacity(0.07) : .clear)
-                    .overlay(alignment: .bottom) { if workspaceMode == mode { Rectangle().fill(Console.red).frame(height: 2) } }
+            Button { openConsole() } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.grid.2x2").foregroundStyle(Console.muted)
+                    Text("CONSOLE").tracking(1.5)
                 }
-                .buttonStyle(.plain).accessibilityAddTraits(workspaceMode == mode ? .isSelected : [])
+                .font(Console.mono(10, weight: .medium)).padding(.horizontal, 20)
+                .frame(height: 38)
+                .foregroundStyle(chatPresented ? Console.muted : Console.blue)
+                .background(chatPresented ? .clear : Console.blue.opacity(0.07))
+                .overlay(alignment: .bottom) {
+                    if !chatPresented { Rectangle().fill(Console.red).frame(height: 2) }
+                }
             }
+            .buttonStyle(.plain).accessibilityAddTraits(chatPresented ? [] : .isSelected)
             Spacer()
-            if !chatSidebarVisible || workspaceMode == .focus {
+            if !chatSidebarVisible {
                 Button {
                     session.updateWorkspaceConsole { $0.sidebarVisible = true }
-                    workspaceMode = .workspace
                 } label: { Image(systemName: "sidebar.left") }
                     .buttonStyle(ConsoleButtonStyle()).help("Show workspaces")
             }
@@ -297,18 +324,13 @@ struct ChatView: View {
             Button { openChat() } label: { Text("OPEN CHAT  ⌘K").font(Console.mono(10)) }
                 .buttonStyle(ConsoleButtonStyle()).padding(.trailing, 18)
             Circle().fill(telemetry.isNetworkAvailable ? Console.green : Console.amber).frame(width: 5, height: 5)
-            Text(telemetry.pathStatus.uppercased()).font(Console.mono(9)).tracking(1).padding(.leading, 7).padding(.trailing, 20)
+            Text(telemetry.pathStatus.uppercased()).font(Console.mono(9)).tracking(1).padding(.leading, 7)
+            Text("VAYDENET").font(Console.mono(10, weight: .semibold)).tracking(1.5)
+                .foregroundStyle(Console.blue).padding(.horizontal, 20)
         }
         .background(Console.panel)
         .overlay(alignment: .top) { Rectangle().fill(Console.line).frame(height: 1) }
         .overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
-    }
-
-    private var activityGraphPanel: some View {
-        ConsolePanel(title: "OPENAI API STATUS", index: "01", status: "PUBLIC FEED / 60 SEC") {
-            CircularActivityView(isActive: scenePhase == .active && !chatPresented)
-                .background(ConsoleGrid())
-        }
     }
 
     private var conversationPanel: some View {
@@ -338,6 +360,27 @@ struct ChatView: View {
                 composer
             }
         }
+    }
+
+    private var chatChannel: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Circle().fill(Console.green).frame(width: 5, height: 5)
+                Button { session.updateWorkspaceConsole { $0.sidebarVisible.toggle() } } label: {
+                    Image(systemName: "sidebar.left")
+                }.buttonStyle(.plain).accessibilityLabel("Toggle chat sidebar")
+                Text("CHANNEL OPEN").tracking(1.2)
+                Text(session.workspaceDirectory.lastPathComponent).foregroundStyle(Console.muted)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+                Button { openConsole() } label: {
+                    Label("CLOSE CHAT", systemImage: "xmark")
+                }.buttonStyle(ConsoleButtonStyle())
+                    .help("Keep the conversation and draft; return to the console")
+            }.font(Console.mono(9)).foregroundStyle(Console.blue)
+            conversationPanel
+        }
+        .background(Console.background)
     }
 
     private var emptyConversation: some View {
@@ -459,7 +502,8 @@ struct ChatView: View {
             Text("VAYDE AOS").tracking(1)
             Text("/  NATIVE CONSOLE").foregroundStyle(Console.muted)
             Spacer()
-            Text(session.isSending ? "MODEL REQUEST IN PROGRESS" : chatPresented ? "CHANNEL OPEN" : "IDLE / TYPE TO INTERRUPT").foregroundStyle(session.isSending ? Console.amber : Console.muted)
+            if !chatPresented && !idlePresented { Text("LOCAL / OBSERVED DATA").foregroundStyle(Console.muted) }
+            Text(session.isSending ? "MODEL REQUEST IN PROGRESS" : idlePresented ? "IDLE" : chatPresented ? "CHANNEL OPEN" : "CONSOLE / ⌘K TO CHAT").foregroundStyle(session.isSending ? Console.amber : Console.muted)
             Rectangle().fill(Console.line).frame(width: 1, height: 10).padding(.horizontal, 8)
             Text("TELEMETRY \(telemetry.lastUpdated == nil ? "INITIALIZING" : "LIVE")").foregroundStyle(Console.blue)
         }

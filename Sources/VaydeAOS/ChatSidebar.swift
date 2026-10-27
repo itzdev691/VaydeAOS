@@ -89,7 +89,7 @@ struct ChatSidebar: View {
             }
         }
         .padding(10).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Console.panel)
+        .background(Console.background.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Console.line.opacity(0.5)))
         .alert("Rename chat", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -217,7 +217,7 @@ private struct ChatSidebarRowStyle: ButtonStyle {
                 .padding(.horizontal, 9).padding(.vertical, 8)
                 .background {
                     RoundedRectangle(cornerRadius: 6)
-                        .fill(Console.text.opacity(selected ? 0.10 : hovering ? 0.05 : 0))
+                        .fill(Console.blue.opacity(selected ? 0.18 : hovering ? 0.08 : 0))
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 6))
                 .opacity(isEnabled ? (configuration.isPressed ? 0.65 : 1) : 0.45)

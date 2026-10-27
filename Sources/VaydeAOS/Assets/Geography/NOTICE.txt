@@ -1,0 +1,4 @@
+Land outlines: Natural Earth, 1:110m physical land, public domain.
+https://www.naturalearthdata.com/about/terms-of-use/
+https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_land.geojson
+Coordinates rounded to three decimal places for the ambient globe.

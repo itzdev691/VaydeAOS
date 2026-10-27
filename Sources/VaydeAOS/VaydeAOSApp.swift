@@ -36,6 +36,12 @@ struct VaydeAOSApp: App {
                 .keyboardShortcut("n", modifiers: .command)
                 .disabled(!startupComplete || !session.canOrganizeChats)
             }
+            CommandGroup(after: .toolbar) {
+                Button("Ambient Display") {
+                    NotificationCenter.default.post(name: .vaydeShowIdle, object: nil)
+                }.keyboardShortcut("i", modifiers: [.command, .shift])
+                    .disabled(!startupComplete || session.isSending || showingConnectionSettings)
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("Connection Settings…") {
                     showingConnectionSettings = true
@@ -70,5 +76,6 @@ final class VaydeAOSAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension Notification.Name {
+    static let vaydeShowIdle = Notification.Name("VaydeAOS.showIdle")
     static let vaydeOpenChat = Notification.Name("VaydeAOS.openChat")
 }

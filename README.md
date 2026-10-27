@@ -90,7 +90,7 @@ Open the header settings control or **Configure Uplink** to set the API base URL
 
 The **Reasoning Mode** slider above **Configure Uplink** saves this chat's effort for subsequent requests. It offers Auto plus only the selected model's reported levels, including provider-defined levels. Auto omits the effort parameter. Unsupported saved choices remain visible with an error and block sending until corrected; choosing another model does not silently reset the saved effort.
 
-The composer also has model and reasoning menus, a catalog refresh control, and a connection-settings shortcut. These remain available in Focus mode and narrow windows. The chat header, sidebar, and account-default menu resolve **Account default** to the runtime catalog's actual model name. Until the catalog loads, the default is labeled unresolved.
+The composer also has model and reasoning menus, a catalog refresh control, and a connection-settings shortcut. These remain available in narrow windows and with the chat sidebar hidden. The chat header, sidebar, and account-default menu resolve **Account default** to the runtime catalog's actual model name. Until the catalog loads, the default is labeled unresolved.
 
 For Ollama and compatible APIs, **Discover models** in Connection Settings reads the selected endpoint's `GET /models` with its API key. It never sends a prompt or follows redirects. Endpoint edits and unsaved keys use a separate discovery state; saved credentials remain scoped to their endpoint. Refresh in the composer reloads the active connection's catalog. Manual model identifiers remain available if discovery is unsupported or fails. A successfully loaded catalog flags models absent from that list; listing a model does not prove inference entitlement or text-chat support.
 
@@ -116,7 +116,7 @@ messages. Replies arrive after the model finishes generating.
 - The **Workspace** selectors in the console navigation and below the message field switch workspaces and provide
   **New Workspace** and **Rename Workspace**. Each workspace remembers its selected chat
   and optional task folder. Each workspace has a console landing page showing its
-  effective task folder, recent chats, notes, focus timer, and activity log.
+  effective task folder, repository state, serial devices, build output, notes, and events.
   Without a selected folder, task files use `Workspaces/<workspace UUID>` in the app's
   Application Support directory. Connection Settings edits the selected workspace's folder;
   each chat remembers its provider, API endpoint, models, and reasoning effort.
@@ -131,7 +131,7 @@ messages. Replies arrive after the model finishes generating.
   Version 2 of the library also owns per-chat connection settings. Legacy chats
   inherit the previous shared settings together before any chat is edited;
   the original `settings.json` remains untouched as a migration source.
-- Console notes, timer deadlines, activity, Auto Idle, and sidebar visibility are saved
+- Console notes, timer deadlines, activity, and sidebar visibility are saved
   separately for each workspace in the same atomic library. Existing global notes and
   preferences import into the previously selected workspace once; other consoles start empty.
   Accounts, endpoint credentials, and host telemetry remain shared. Workspace isolation
@@ -152,53 +152,88 @@ An original 3.45-second chime plays once. **VaydeAOS → Startup Sound** saves
 the sound preference for future launches.
 The sequence is a local interface transition and does not run model requests.
 
-The current experimental palette uses the live VaydeNet site's
-[design tokens](https://vaydenet.duckdns.org/css/tokens.css): navy `#070b18`,
-blue `#60a5fa` / `#1d4ed8`, and red `#ff4c5b`. Green remains a status color.
-The palette is centralized in `ConsoleTheme.swift`, including the circular activity graph and settings.
+The console uses the logo's blue `#007bfd`, white `#fdfdfd`, and red `#ff3e32`
+in a 60/30/10 hierarchy: blue-family surfaces and structure dominate, white supports
+readable content, and red marks small accents. Brighter blue tints are limited to
+selected, hovered, and focused controls. Colors are centralized in `ConsoleTheme.swift`.
+**Ask Vayde** uses Avenir Next Demi Bold.
 
-- **Console** opens the selected workspace's landing page with recent chats and four widgets:
-  an ambient signal field, focus timer with 5/15/25/50-minute presets,
-  locally saved scratchpad, and a timestamped workspace activity log.
-- **Signal Field** replaces the duplicate CPU/RX/TX inspector with a flowing wire
-  surface. **Phase Core** replaces the repeated session summary with orbital
-  artwork. Both are labeled **Ambient**, contain no telemetry or simulated
-  measurements, and use native procedural graphics. Animation stops when the
-  app is inactive, when the field is hidden by chat, or with Reduce Motion enabled.
-- **Interrupt**, **Command-K**, or typing outside a text editor opens chat in the
-  main center column, with the side instruments accessible. Input monitoring is
-  limited to this app's window. Dashboard timers and widget state survive switching.
-- **Workspace Console** or **Escape** hides chat without discarding its draft or history.
-  During a request, Escape stops the response first. A completed request reopens
-  the channel if it was hidden. Saved connection errors remain visible on the console.
-- **Auto Idle** returns chat to the dashboard after 60 seconds without keyboard,
-  click, or scroll input, only when there is no draft, request, error, or settings sheet.
-- Scratchpad **Edit/Done** controls editing; **To Chat** appends notes to the draft
-  without sending them. Notes, Auto Idle, the timer, and the latest 40 activity entries
-  persist per workspace. A running timer keeps its deadline while another workspace is open
-  or the app is closed; its completion is recorded once when that console is next observed.
-- **Network** expands the circular activity graph; **Focus** opens chat and hides the side columns.
-- CPU, active/wired/compressed memory, uptime, interface addresses, and primary
-  interface traffic come from local macOS APIs. Samples refresh once per second.
-- Traffic plots retain up to 60 observed samples and scale independently. They
-  measure the selected local interface, not model API traffic or remote nodes.
-- **OpenAI API Status** polls OpenAI's public
-  [status feed](https://status.openai.com/api/v2/summary.json) every 60 seconds
-  while the dashboard is visible and the app is active. The circular graph keeps
-  the last 60 observations of Chat Completions (inner band) and Responses (outer
-  band). Outward spikes indicate reported degradation or outages; colors identify
-  operational, degraded, outage, and maintenance states. Missing components,
-  unknown states, and failed polls leave gaps. Failed or older-than-150-second
-  observations show an unavailable or stale feed indicator. History is session-only;
-  hidden/background time is not filled with invented samples. No API key, prompts,
-  or configured endpoint/model are sent to the status feed. OpenAI aggregates
-  availability across models and tiers; this graph does not report a selected
-  model's latency, token speed, or benchmark score. The right-offset circle retains
-  its subtle bounce and border clipping; Reduce Motion disables bounce.
-- Narrow windows collapse the right instrument column; side panels scroll.
-- VaydeNet photography and the wolf mark are bundled with the app. The interaction
-  hierarchy draws on the VaydeAOS Obsidian planning notes; it does not imply a
-  running vault integration or autonomous agent tools.
+- **Project State** reads the selected directory's Git branch, commit, commit age, and
+  changed-file count every five seconds. **Project** selects a directory for both the
+  console and the agent. A matching sibling checkout is selected automatically when
+  the app is packaged under a repository's `build/` folder. Chat storage stays in
+  Application Support. Project and build-command choices persist per workspace.
+- **StudentDB** keeps the same panel sizes and positions, with **Source Map**, **C++
+  Workbench**, **Source Trace / CLI Session / Build Output**, and **Learning Notes**.
+  The profile follows the StudentDB workspace or a selected StudentDB checkout. An
+  unbound StudentDB workspace uses `~/StudentDB(deploy)` when its CMake project exists.
+  Explicit project selections take precedence. Source selection and output tab persist
+  per workspace; chat history, model settings, notes, and project bindings remain isolated.
+  **C++ Learning Context** opens the linked Obsidian note in the VaydeNetV vault.
+- StudentDB defaults to a Debug CMake build with warnings in `build/vaydeaos`, avoiding
+  older build caches. **Run CLI** launches that build in the selected project directory;
+  **CLI Session** is a terminal with inline prompts, a cursor, selectable scrollback,
+  and direct keyboard input. Click the terminal to focus it; Return submits input.
+  Input echoes normally, and the CLI controls any password hiding through its own
+  terminal settings. Cursor movement, Backspace, paste, ANSI formatting, terminal
+  resizing, and control keys are handled by the terminal. **Stop** ends the process.
+  The running CLI and terminal state belong to their workspace and survive navigation
+  until exit; terminal contents are not saved to the chat library.
+  Confirming enrollment can write `students.txt` in the displayed project directory;
+  **Record Output** reveals that file. Its existence/size, build exit status, and CLI
+  exit status are separate observations, not assertions of validation or login correctness.
+- **Device Bench** discovers macOS USB serial ports every five seconds. **Serial**
+  opens a port exclusively at the selected baud rate; **Close** releases it. Detected
+  ports are not labeled as running firmware. No firmware is flashed automatically.
+- **Transport Readiness** displays measured host network throughput, serial connection
+  state, and decoded device-report counts. Radio/peer state remains **Unverified**
+  until a device supplies evidence; host network activity does not prove radio health.
+- **Packet Inspector** accepts VaydeNet `Logical message delivered:` logs containing
+  `source`, `sequence`, and `payload`, or JSON records containing `transport`, `sender`
+  (or `senderID`), and `sequence` (or `sequenceNumber`). JSON can also report `direction`
+  (`rx`/`tx`) and `result`; missing values stay unknown. Heartbeat submissions are not
+  counted as peer delivery. **Pause** pauses packet capture while raw serial continues.
+  **Clear** clears the selected output buffer. Buffers are bounded in memory.
+- **Build & Verification** runs a local build or test command from **Setup** in the
+  selected project directory and streams stdout/stderr into **Build Output**. The
+  initial command comes from detected project files; VaydeNet defaults to its host
+  verification suite. Build success comes from the process exit code. Serial ownership
+  is released before a build. Serial and build output are aligned to the top left,
+  wrap to the available width, and use larger type with additional line spacing.
+  **Following/Follow** controls whether new output scrolls to the latest line.
+  Running jobs and serial sessions survive workspace
+  navigation; they end when the app exits. Connection and build events are local.
+- **Ask Vayde**, **Open Chat**, or **Command-K** opens chat
+  below the console, keeping telemetry and project controls visible in the same window.
+  Typing in other controls does not open chat or redirect input into its draft.
+  Right-click **Ask Vayde** for **Model activity**.
+  The model panel retains request timing, provider-reported usage, tools, and reasoning.
+- **Close Chat**, **Console**, or **Escape** hides chat without discarding its draft or
+  history. During a request, Escape stops the response first. A completed request
+  reopens the channel if hidden. After 15 seconds without input, the ambient
+  dashboard fades in with live CPU/memory, uptime, interfaces, RX/TX history,
+  model state, and public OpenAI API health. **View → Ambient Display** (Command-Shift-I)
+  opens it immediately. The geographic globe rotates automatically; drag to turn
+  and tilt it, pinch or use +/- to zoom, pause rotation, or reset the view.
+  Panel 05 fills the right column above API status with a circular system-audio
+  spectrum. **Enable audio** requests macOS Screen & System Audio Recording access.
+  Capture runs only while the idle dashboard is visible and the app is active.
+  Audio is analyzed locally and never saved; no microphone input is used.
+  Silence produces a flat ring. Globe connections remain ambient artwork;
+  throughput and host readouts remain measured data. Reduce Motion pauses globe
+  animation; live audio levels continue to update.
+  Pressing a key or clicking **Idle** / the resume footer returns to the previous
+  console, chat, or model panel with draft and state preserved. The first wake key
+  is consumed; pointer movement and graph controls keep the ambient screen open.
+  Active requests, runtime prompts, and open sheets keep the workspace visible.
+- Scratchpad **Edit/Done** controls editing. Notes persist independently per workspace.
+  Existing timer deadlines and older activity entries remain in the saved library.
+- Host interface traffic comes from local macOS APIs, sampled once per second.
+  Serial/build buffers and telemetry events are session-local; notes and project choices
+  persist. No illustrative device, packet, build, or transport readings are generated.
+
+Run `./scripts/check-project-console.sh` to verify real subprocess stdout/stderr,
+exit codes, burst draining, and pseudo-terminal serial capture without opening hardware.
 
 ## Local data
 

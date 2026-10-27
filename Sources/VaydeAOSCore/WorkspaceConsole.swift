@@ -49,8 +49,29 @@ public struct WorkspaceConsoleState: Codable, Equatable, Sendable {
     public var events: [WorkspaceEvent] = []
     public var autoIdle = true
     public var sidebarVisible = true
+    public var panelExpanded = false
+    public var projectDirectory: String?
+    public var buildCommand: String?
+    public var studentDB = StudentDBConsoleState()
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case scratchpad, timer, events, autoIdle, sidebarVisible, panelExpanded, projectDirectory, buildCommand, studentDB
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        scratchpad = try values.decode(String.self, forKey: .scratchpad)
+        timer = try values.decode(WorkspaceFocusTimer.self, forKey: .timer)
+        events = try values.decode([WorkspaceEvent].self, forKey: .events)
+        autoIdle = try values.decode(Bool.self, forKey: .autoIdle)
+        sidebarVisible = try values.decode(Bool.self, forKey: .sidebarVisible)
+        panelExpanded = try values.decodeIfPresent(Bool.self, forKey: .panelExpanded) ?? false
+        projectDirectory = try values.decodeIfPresent(String.self, forKey: .projectDirectory)
+        buildCommand = try values.decodeIfPresent(String.self, forKey: .buildCommand)
+        studentDB = try values.decodeIfPresent(StudentDBConsoleState.self, forKey: .studentDB) ?? StudentDBConsoleState()
+    }
 
     public mutating func record(_ title: String) {
         events.append(WorkspaceEvent(title: title))

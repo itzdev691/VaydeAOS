@@ -20,6 +20,7 @@ final class ChatLibraryTests {
             $0.scratchpad = "Private first notes"
             $0.autoIdle = false
             $0.sidebarVisible = false
+            $0.panelExpanded = true
             $0.timer.reset(minutes: 5)
             $0.timer.toggle(at: start)
             $0.record("First workspace action")
@@ -64,6 +65,27 @@ final class ChatLibraryTests {
         session.updateWorkspaceConsole { $0.scratchpad = "Unsaved notes"; $0.record("Unsaved action") }
         #expect(session.workspaces == before)
         #expect(session.errorMessage?.contains("Could not save workspace console") == true)
+    }
+
+    @Test func existingConsoleLoadsWithCollapsedPanelAndPreservesSavedState() throws {
+        var console = WorkspaceConsoleState()
+        console.scratchpad = "Keep these notes"
+        console.autoIdle = false
+        console.sidebarVisible = false
+        console.timer.reset(minutes: 15)
+        console.record("Saved before workspace panels")
+        var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(console)) as? [String: Any])
+        json.removeValue(forKey: "panelExpanded")
+        let restored = try JSONDecoder().decode(WorkspaceConsoleState.self,
+            from: JSONSerialization.data(withJSONObject: json))
+        #expect(restored == console)
+        #expect(!restored.panelExpanded)
+        // Only the new field is optional; damaged saved notes must still fail to load.
+        json.removeValue(forKey: "scratchpad")
+        let damaged = try JSONSerialization.data(withJSONObject: json)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(WorkspaceConsoleState.self, from: damaged)
+        }
     }
 
     @Test func preConsoleLibrariesLoadWithoutLosingChatsOrChangingOriginalFile() throws {

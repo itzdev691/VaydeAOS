@@ -5,6 +5,7 @@ import VaydeAOSCore
 /// OpenAI's public aggregate API health, independent of this app's model requests.
 struct CircularActivityView: View {
     var isActive: Bool
+    var compact = false
     @StateObject private var status = PublicAPIStatus()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -12,19 +13,23 @@ struct CircularActivityView: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || !isActive)) { timeline in
             Canvas { context, size in
                 StatusDrawing.draw(in: &context, size: size, history: status.history,
-                    phase: reduceMotion || !isActive ? 0 : timeline.date.timeIntervalSinceReferenceDate)
+                    phase: reduceMotion || !isActive ? 0 : timeline.date.timeIntervalSinceReferenceDate, compact: compact)
             }
         }
         .clipped()
         .overlay(alignment: .leading) {
-            readout.frame(width: 175, alignment: .leading).padding(.leading, 22)
+            Group {
+                if compact { compactReadout } else { readout }
+            }.frame(width: compact ? 155 : 175, alignment: .leading).padding(.leading, compact ? 12 : 22)
         }
         .overlay(alignment: .trailing) {
             VStack(alignment: .trailing, spacing: 10) {
-                legend("OPERATIONAL", color: Console.blue)
-                legend("DEGRADED", color: Console.amber)
-                legend("OUTAGE", color: Console.red)
-                legend("MAINTENANCE", color: Console.muted)
+                if !compact {
+                    legend("OPERATIONAL", color: Console.blue)
+                    legend("DEGRADED", color: Console.amber)
+                    legend("OUTAGE", color: Console.red)
+                    legend("MAINTENANCE", color: Console.muted)
+                }
             }.padding(.trailing, 22).allowsHitTesting(false)
         }
         .task(id: isActive) {
@@ -35,10 +40,31 @@ struct CircularActivityView: View {
         .help("Source: status.openai.com, refreshed every 60 seconds while visible. Aggregate availability across models and tiers, not per-model latency, throughput, or benchmark performance. Inner band: Chat Completions; outer band: Responses. Outward spikes: degraded, partial outage, major outage. Missing data leaves gaps. Vertical bounce is decorative.")
     }
 
+    private var compactReadout: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach([0, 1], id: \.self) { service in
+                    let state = (service == 0 ? status.snapshot?.chatCompletions : status.snapshot?.responses) ?? .unknown
+                    HStack(spacing: 6) {
+                        Text(service == 0 ? "COMPLETIONS" : "RESPONSES").foregroundStyle(Console.muted)
+                        Spacer(minLength: 0)
+                        Text(state.label).foregroundStyle(StatusDrawing.color(state))
+                    }.font(Console.mono(7))
+                }
+                Text("AGGREGATE / ALL MODELS").font(Console.mono(6)).foregroundStyle(Console.muted)
+                Text(status.feedFailed ? "FEED UNAVAILABLE" : status.lastSuccess.map {
+                    "\(status.isStale(at: timeline.date) ? "STALE" : "FETCHED") \(max(0, Int(timeline.date.timeIntervalSince($0))))S AGO"
+                } ?? "FETCHING STATUS").font(Console.mono(6)).foregroundStyle(status.feedFailed ? Console.amber : Console.muted)
+                Link("STATUS.OPENAI.COM", destination: URL(string: "https://status.openai.com")!)
+                    .font(Console.mono(6)).foregroundStyle(Console.blueBright)
+            }
+        }
+    }
+
     private var readout: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
             VStack(alignment: .leading, spacing: 8) {
-                Text("OPENAI / PUBLIC HEALTH")
+                Text(compact ? "PUBLIC HEALTH" : "OPENAI / PUBLIC HEALTH")
                     .font(Console.mono(8)).tracking(1).foregroundStyle(Console.muted)
                 if status.history.isEmpty {
                     Text("FETCHING STATUS").font(Console.mono(11)).foregroundStyle(Console.blue)
@@ -46,7 +72,7 @@ struct CircularActivityView: View {
                     service("CHAT COMPLETIONS / INNER", state: status.snapshot?.chatCompletions ?? .unknown)
                     service("RESPONSES / OUTER", state: status.snapshot?.responses ?? .unknown)
                 }
-                Text("AGGREGATE ACROSS MODELS")
+                Text(compact ? "ALL MODELS / TIERS" : "AGGREGATE ACROSS MODELS")
                     .font(Console.mono(7)).foregroundStyle(Console.muted)
                 if status.feedFailed {
                     Text("FEED UNAVAILABLE / RETRY 60S")
@@ -87,10 +113,10 @@ private enum StatusDrawing {
     }
 
     static func draw(in context: inout GraphicsContext, size: CGSize,
-                     history: [OpenAIStatusSample], phase: Double) {
-        let radius = min(size.height * 0.62, size.width * 0.34)
+                     history: [OpenAIStatusSample], phase: Double, compact: Bool = false) {
+        let radius = compact ? min(size.height * 0.43, size.width * 0.18) : min(size.height * 0.62, size.width * 0.34)
         guard radius > 10 else { return }
-        let center = CGPoint(x: size.width * 0.62, y: size.height / 2 + sin(phase * 1.6) * 1.4)
+        let center = CGPoint(x: size.width * (compact ? 0.80 : 0.62), y: size.height / 2 + sin(phase * 1.6) * 1.4)
         let r = radius * (1 + sin(phase * 1.15) * 0.004)
         context.fill(circle(center, r * 1.2), with: .radialGradient(
             Gradient(colors: [Console.blue.opacity(0.07), .clear]), center: center,

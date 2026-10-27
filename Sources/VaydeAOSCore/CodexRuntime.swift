@@ -99,6 +99,8 @@ public final class CodexRuntime: ObservableObject {
         var textByItem: [String: String] = [:]
         var itemOrder: [String] = []
         var finalItemIDs: [String] = []
+        var inputTokens: Int?
+        var outputTokens: Int?
         var continuation: CheckedContinuation<ChatReply, Error>?
         let onText: @MainActor (String) -> Void
         let timer: Task<Void, Never>
@@ -457,6 +459,15 @@ public final class CodexRuntime: ObservableObject {
         if let requestID { handleRequest(method, params, requestID); return }
         switch method {
         case "turn/started": active?.turnID = params["turn"]["id"].text
+        case "thread/tokenUsage/updated":
+            // `last` describes the last model response, not the thread's lifetime total.
+            // Keep missing or malformed counters unavailable instead of estimating them.
+            func count(_ value: CodexValue) -> Int? {
+                guard case .number(let number) = value, let integer = Int(exactly: number), integer >= 0 else { return nil }
+                return integer
+            }
+            active?.inputTokens = count(params["tokenUsage"]["last"]["inputTokens"])
+            active?.outputTokens = count(params["tokenUsage"]["last"]["outputTokens"])
         case "item/agentMessage/delta":
             guard let id = params["itemId"].text, let delta = params["delta"].text else { return }
             guard current.textByItem.values.reduce(0, { $0 + $1.utf8.count }) + delta.utf8.count <= 2 * 1024 * 1024 else {
@@ -481,7 +492,8 @@ public final class CodexRuntime: ObservableObject {
                 let ids = current.finalItemIDs.isEmpty ? current.itemOrder : current.finalItemIDs
                 let text = ids.compactMap { current.textByItem[$0] }.joined(separator: "\n\n")
                 finish(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? .failure(CodexRuntimeError.emptyReply) : .success(ChatReply(content: text)))
+                    ? .failure(CodexRuntimeError.emptyReply)
+                    : .success(ChatReply(content: text, inputTokens: current.inputTokens, outputTokens: current.outputTokens)))
             } else if turn["status"].text == "interrupted" { finish(.failure(CancellationError())) }
             else { finish(.failure(CodexRuntimeError.turnFailed)) }
         case "error":

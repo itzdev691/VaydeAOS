@@ -300,6 +300,27 @@ public final class ChatSession: ObservableObject {
 
     public var workspaceConsole: WorkspaceConsoleState { selectedWorkspace.console }
 
+    /// Select one project for the console and the agent without moving saved chats.
+    public func selectWorkspaceProject(_ directory: String) throws {
+        guard canOrganizeChats else { throw SessionError.requestInProgress }
+        guard messagesLoadIssue == nil, recoveryLoadIssue == nil else { throw CocoaError(.fileReadCorruptFile) }
+        let url = URL(fileURLWithPath: directory, isDirectory: true).resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw CocoaError(.fileReadNoSuchFile)
+        }
+        snapshotCurrentChat()
+        var next = library
+        let index = next.workspaces.firstIndex { $0.id == selectedWorkspaceID }!
+        next.workspaces[index].directory = url.path
+        next.workspaces[index].console.projectDirectory = url.path
+        next.workspaces[index].console.buildCommand = nil
+        try store.save(next, to: "chat-library.json")
+        library = next
+        settings.codexWorkspace = url.path
+        publishLibrary()
+    }
+
     /// Console edits may happen during generation; snapshot the active prompt as well.
     public func updateWorkspaceConsole(_ update: (inout WorkspaceConsoleState) -> Void) {
         guard libraryLoadIssue == nil, messagesLoadIssue == nil, recoveryLoadIssue == nil else { return }
