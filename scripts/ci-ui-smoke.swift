@@ -2,10 +2,11 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-// Launch-only smoke test. This does not exercise controls or assert visual fidelity.
+// Launch smoke test. Background mode also checks accessory policy and window suppression.
 func smokeTest() throws {
-    guard CommandLine.arguments.count == 3 else {
-        throw failure("Usage: swift scripts/ci-ui-smoke.swift <app> <log>")
+    let backgroundLaunch = Array(CommandLine.arguments.dropFirst(3)) == ["--background"]
+    guard CommandLine.arguments.count == 3 || (CommandLine.arguments.count == 4 && backgroundLaunch) else {
+        throw failure("Usage: swift scripts/ci-ui-smoke.swift <app> <log> [--background]")
     }
     let appURL = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
     guard let bundle = Bundle(url: appURL), let executable = bundle.executableURL else {
@@ -25,7 +26,9 @@ func smokeTest() throws {
     defer { try? log.close() }
 
     let process = Process()
+    process.environment = ProcessInfo.processInfo.environment.merging(["VAYDEAOS_DISABLE_VOICE": "1"]) { _, value in value }
     process.executableURL = executable
+    if backgroundLaunch { process.arguments = ["--background"] }
     process.standardOutput = log
     process.standardError = log
     try process.run()
@@ -37,7 +40,8 @@ func smokeTest() throws {
         process.waitUntilExit()
     }
 
-    let deadline = Date().addingTimeInterval(30)
+    let startedAt = Date()
+    let deadline = startedAt.addingTimeInterval(30)
     var windowPresentSince: Date?
     while Date() < deadline {
         guard process.isRunning else {
@@ -51,7 +55,22 @@ func smokeTest() throws {
                   let layer = window[kCGWindowLayer as String] as? Int,
                   let bounds = window[kCGWindowBounds as String] as? [String: CGFloat] else { return false }
             return pid == process.processIdentifier && layer == 0
+                && (!backgroundLaunch || (window[kCGWindowIsOnscreen as String] as? Bool ?? false))
                 && (bounds["Width"] ?? 0) >= 800 && (bounds["Height"] ?? 0) >= 600
+        }
+        if backgroundLaunch {
+            let elapsed = Date().timeIntervalSince(startedAt)
+            // Allow initial SwiftUI window creation to settle before checking suppression.
+            if elapsed >= 2, hasWindow { throw failure("Background launch presented a workspace window.") }
+            if elapsed >= 10 {
+                guard NSRunningApplication(processIdentifier: process.processIdentifier)?.activationPolicy == .accessory else {
+                    throw failure("Background app did not use accessory activation policy.")
+                }
+                print("PASS: background launch stayed running without a workspace window for 10 seconds, using accessory policy.")
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+            continue
         }
         if hasWindow {
             if windowPresentSince == nil { windowPresentSince = Date() }

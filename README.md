@@ -33,6 +33,39 @@ VAYDEAOS_APP_DIR="$PWD/build/workspace-review/VaydeAOS.app" ./build.sh
 
 This builds and signs the separate bundle without launching or restarting the app.
 
+## Background app
+
+VaydeAOS runs as a menu-bar app. Closing its window keeps voice, model requests,
+project consoles, and serial connections running. **Open VaydeAOS** in the menu bar
+reopens the workspace; **Hide Window** returns it to the background. Opening the
+app again from Finder or Spotlight also restores the window. It has no running
+Dock tile. **Quit VaydeAOS** exits and shuts down its services.
+
+**Launch at Login** in the menu-bar menu uses macOS Login Items. Its switch reflects
+the system setting; VaydeAOS does not register itself until you enable it. If macOS
+requires approval, the menu links to Login Items settings. Login launches keep the
+workspace hidden. `open -a VaydeAOS --args --background` also starts it without a
+workspace window. Dashboard animations, system-audio visualization, and repository
+polling stop while the window is hidden; active requests and console jobs continue.
+
+## Vayde Voice
+
+Voice starts enabled and requests macOS microphone and speech-recognition access on
+the first launch. Say **“Hey Vayde”**, wait for **“Yes?”**, then speak a request.
+Vayde sends it through the current chat's model and tools and reads its answer aloud.
+The microphone button and the menu bar's **Vayde Voice** submenu show status and listening controls.
+
+Standby uses the native macOS command recognizer; full on-device English dictation
+runs only after activation. There is no cloud transcription fallback, and no audio
+is saved. Request text and the current conversation go to the selected AI provider.
+Always listening requires CPU, memory, and microphone access; it cannot use zero
+system resources. Idle resource usage has not been benchmarked.
+
+Closing the window keeps Vayde Voice running. Quitting stops it. Voice pauses while
+the Mac is locked or asleep, during typed requests, and during its own speech.
+Launch at Login is optional. Typed drafts are preserved;
+failed voice attempts remain visible in chat. See [voice behavior and validation](docs/voice-assistant.md).
+
 ## Apple UI CI/CD
 
 [Apple UI CI/CD](.github/workflows/apple-ui.yml) runs on pull requests targeting

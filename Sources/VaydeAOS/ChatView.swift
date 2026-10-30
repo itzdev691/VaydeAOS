@@ -3,12 +3,14 @@ import SwiftUI
 import VaydeAOSCore
 
 struct ChatView: View {
+    @EnvironmentObject private var voice: VoiceAssistant
     @ObservedObject var session: ChatSession
+    @ObservedObject var projectConsoles: ProjectConsoleRegistry
     @Binding var showingConnectionSettings: Bool
     @StateObject private var telemetry = SystemTelemetry()
-    @StateObject private var projectConsoles = ProjectConsoleRegistry()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.workspaceWindowVisible) private var workspaceWindowVisible
     @Environment(\.workspaceBootReady) private var bootReady
     @State private var bootStep = 0
     @FocusState private var composerFocused: Bool
@@ -82,11 +84,13 @@ struct ChatView: View {
                 .allowsHitTesting(!idlePresented)
                 .accessibilityHidden(idlePresented)
                 .overlay {
-                    IdleDashboardView(session: session, telemetry: telemetry,
-                                      isActive: idlePresented && scenePhase == .active)
-                        .opacity(idlePresented ? 1 : 0)
-                        .allowsHitTesting(idlePresented)
-                        .accessibilityHidden(!idlePresented)
+                    if workspaceWindowVisible {
+                        IdleDashboardView(session: session, telemetry: telemetry,
+                                          isActive: idlePresented && scenePhase == .active)
+                            .opacity(idlePresented ? 1 : 0)
+                            .allowsHitTesting(idlePresented)
+                            .accessibilityHidden(!idlePresented)
+                    }
                 }
                 .padding(.horizontal, 15).padding(.vertical, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -135,7 +139,7 @@ struct ChatView: View {
             }
         }
         .onReceive(idleTicker) { date in
-            guard bootReady, reduceMotion || bootStep == 11, scenePhase == .active,
+            guard workspaceWindowVisible, bootReady, reduceMotion || bootStep == 11, scenePhase == .active,
                   !idlePresented, !showingConnectionSettings, NSApp.modalWindow == nil,
                   NSApp.keyWindow?.sheetParent == nil,
                   NSApp.keyWindow?.sheets.isEmpty == true, !session.isSending,
@@ -152,14 +156,19 @@ struct ChatView: View {
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) { idlePresented = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .vaydeOpenChat)) { _ in openChat(resuming: true) }
-        .onAppear { telemetry.start() }
+        .onAppear {
+            if workspaceWindowVisible && scenePhase != .background { telemetry.start() }
+            if voice.isInteracting { openChat(resuming: true) }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             closeChatChannel()
-            projectConsoles.shutdown()
         }
         .onDisappear { closeChatChannel(); telemetry.stop() }
+        .onChange(of: workspaceWindowVisible) { visible in
+            if visible && scenePhase != .background { telemetry.start() } else { telemetry.stop() }
+        }
         .onChange(of: scenePhase) { phase in
-            if phase == .background { telemetry.stop() } else { telemetry.start() }
+            if phase == .background || !workspaceWindowVisible { telemetry.stop() } else { telemetry.start() }
             if phase == .active { _ = registerInteraction() }
         }
         .onChange(of: session.selectedWorkspaceID) { _ in
@@ -304,6 +313,7 @@ struct ChatView: View {
                 }
                 Text("LOCAL WORKSPACE / macOS").tracking(1).font(Console.mono(9)).foregroundStyle(Console.muted)
             }
+            VoiceAssistantButton(voice: voice)
             Button { showingConnectionSettings = true } label: {
                 Image(systemName: "slider.horizontal.3").font(.system(size: 15)).frame(width: 20, height: 20)
             }

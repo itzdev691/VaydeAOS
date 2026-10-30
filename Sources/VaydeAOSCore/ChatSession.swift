@@ -38,6 +38,7 @@ public final class ChatSession: ObservableObject {
     private var catalogChanges: AnyCancellable?
     @Published public private(set) var modelCatalogRevision = 0
     private var activeRequest: ActiveRequest?
+    private var voiceCompletions: [UUID: CheckedContinuation<String?, Never>] = [:]
     private var settingsLoadIssue: String?
     private var configurationLoadIssue: String?
     private var messagesLoadIssue: String?
@@ -50,6 +51,7 @@ public final class ChatSession: ObservableObject {
         let originalDraft: String
         let message: ChatMessage
         let configuration: ConnectionSettings
+        let preservesDraft: Bool
     }
 
     public init(
@@ -190,16 +192,41 @@ public final class ChatSession: ObservableObject {
     }
 
     public var canSend: Bool {
+        canSendVoice && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Voice requests use the same connection gates without consuming the typed draft.
+    public var canSendVoice: Bool {
         !isSending && activeRequest == nil && loadIssues == nil
             && !isDiscoveringModels && modelSelection.issue == nil
             && (settings.provider != .chatGPT || (!codex.isRunning && !codex.isChecking
                 && !settings.needsChatGPTAccountReview && (!codex.hasCheckedAccount || codex.isSignedIn)))
-            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     public func send() {
         guard canSend else { return }
+        beginRequest(text: draft, preservesDraft: false)
+    }
 
+    /// Returns only the reply belonging to this voice turn, never a previous or typed reply.
+    public func sendVoice(_ text: String) async -> String? {
+        guard !Task.isCancelled, canSendVoice, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let chatID = selectedChatID
+        guard let messageID = beginRequest(text: text, preservesDraft: true) else { return nil }
+        let reply: String? = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled { continuation.resume(returning: nil) }
+                else { voiceCompletions[messageID] = continuation }
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor in self?.voiceCompletions.removeValue(forKey: messageID)?.resume(returning: nil) }
+        }
+        guard !Task.isCancelled, selectedChatID == chatID else { return nil }
+        return reply
+    }
+
+    @discardableResult
+    private func beginRequest(text: String, preservesDraft: Bool) -> UUID? {
         let request: ActiveRequest
         let connection: ConnectionSettings
         let apiKey: String?
@@ -215,12 +242,13 @@ public final class ChatSession: ObservableObject {
             request = ActiveRequest(
                 id: UUID(),
                 originalDraft: draft,
-                message: ChatMessage(role: .user, content: draft.trimmingCharacters(in: .whitespacesAndNewlines)),
-                configuration: connection
+                message: ChatMessage(role: .user, content: text.trimmingCharacters(in: .whitespacesAndNewlines)),
+                configuration: connection,
+                preservesDraft: preservesDraft
             )
         } catch {
             errorMessage = "Could not send message: \(error.localizedDescription)"
-            return
+            return nil
         }
 
         let conversation = messages + [request.message]
@@ -228,7 +256,7 @@ public final class ChatSession: ObservableObject {
         pendingMessage = request.message
         isSending = true
         partialReply = ""
-        draft = ""
+        if !preservesDraft { draft = "" }
         errorMessage = nil
         notice = nil
         saveLibrary()
@@ -267,6 +295,7 @@ public final class ChatSession: ObservableObject {
                 }
             }
         }
+        return request.message.id
     }
 
     public func stop() {
@@ -276,9 +305,9 @@ public final class ChatSession: ObservableObject {
         let recoveryError = preserveInterruptedTurn(request, wasCancelled: true)
         recordPerformance(outcome: .cancelled)
         clearActiveRequest()
-        draft = request.originalDraft
+        if !request.preservesDraft { draft = request.originalDraft }
         errorMessage = recoveryError
-        notice = cancellationNotice
+        notice = request.preservesDraft ? "Voice request stopped. The attempt is saved in chat; your typed draft was preserved." : cancellationNotice
         saveLibrary()
     }
 
@@ -463,7 +492,7 @@ public final class ChatSession: ObservableObject {
 
     private func snapshotCurrentChat() {
         guard let index = library.chats.firstIndex(where: { $0.id == selectedChatID }) else { return }
-        let savedDraft = activeRequest?.originalDraft ?? draft
+        let savedDraft = activeRequest.flatMap { $0.preservesDraft ? nil : $0.originalDraft } ?? draft
         let changed = library.chats[index].messages != messages || library.chats[index].draft != savedDraft
             || library.chats[index].interruptedTurns != interruptedTurns
         library.chats[index].messages = messages
@@ -616,7 +645,7 @@ public final class ChatSession: ObservableObject {
             model: request.configuration.activeModel, source: .requested)
         messages.append(ChatMessage(role: .assistant, content: response.content, attribution: attribution))
         recordPerformance(outcome: .success, reply: response)
-        clearActiveRequest()
+        clearActiveRequest(reply: response.content)
         if !saveLibrary() {
             errorMessage = "The reply was received, but the conversation could not be saved."
         }
@@ -627,7 +656,7 @@ public final class ChatSession: ObservableObject {
         let recoveryError = preserveInterruptedTurn(request, wasCancelled: false)
         recordPerformance(outcome: .failed)
         clearActiveRequest()
-        draft = request.originalDraft
+        if !request.preservesDraft { draft = request.originalDraft }
         saveLibrary()
         let prefix = settings.provider == .chatGPT ? "Response interrupted" : "Could not send message"
         errorMessage = ["\(prefix): \(description)", recoveryError].compactMap { $0 }.joined(separator: "\n")
@@ -638,9 +667,9 @@ public final class ChatSession: ObservableObject {
         let recoveryError = preserveInterruptedTurn(request, wasCancelled: true)
         recordPerformance(outcome: .cancelled)
         clearActiveRequest()
-        draft = request.originalDraft
+        if !request.preservesDraft { draft = request.originalDraft }
         errorMessage = recoveryError
-        notice = cancellationNotice
+        notice = request.preservesDraft ? "Voice request stopped. The attempt is saved in chat; your typed draft was preserved." : cancellationNotice
         saveLibrary()
     }
 
@@ -651,9 +680,10 @@ public final class ChatSession: ObservableObject {
     }
 
     private func preserveInterruptedTurn(_ request: ActiveRequest, wasCancelled: Bool) -> String? {
-        guard settings.provider == .chatGPT, performanceRequestStartedAt != nil else { return nil }
+        guard settings.provider == .chatGPT || request.preservesDraft, performanceRequestStartedAt != nil else { return nil }
         let response = partialReply.isEmpty ? nil : ChatMessage(role: .assistant, content: partialReply)
-        interruptedTurns.append(InterruptedTurn(message: request.message, originalDraft: request.originalDraft,
+        interruptedTurns.append(InterruptedTurn(message: request.message,
+            originalDraft: request.preservesDraft ? request.message.content : request.originalDraft,
             response: response, afterMessageCount: messages.count, wasCancelled: wasCancelled))
         return saveLibrary() ? nil : "The interrupted response is visible, but could not be saved."
     }
@@ -666,13 +696,15 @@ public final class ChatSession: ObservableObject {
         if performanceHistory.count > 60 { performanceHistory.removeFirst(performanceHistory.count - 60) }
     }
 
-    private func clearActiveRequest() {
+    private func clearActiveRequest(reply: String? = nil) {
+        let voiceCompletion = activeRequest.flatMap { voiceCompletions.removeValue(forKey: $0.message.id) }
         partialReply = ""
         performanceRequestStartedAt = nil
         activeRequest = nil
         pendingMessage = nil
         isSending = false
         sendTask = nil
+        voiceCompletion?.resume(returning: reply)
     }
 
     private enum SessionError: LocalizedError {

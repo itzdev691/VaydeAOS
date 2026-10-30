@@ -37,7 +37,7 @@ resource_bundle="VaydeAOS_VaydeAOS.bundle"
 ditto "$binary_dir/$resource_bundle" "$app_dir/Contents/Resources/$resource_bundle"
 # Package the terminal renderer's resources alongside the app's resources.
 ditto "$binary_dir/SwiftTerm_SwiftTerm.bundle" "$app_dir/Contents/Resources/SwiftTerm_SwiftTerm.bundle"
-cp "$project_dir/.build/checkouts/SwiftTerm/LICENSE" "$app_dir/Contents/Resources/SwiftTerm-LICENSE.txt"
+cp -f "$project_dir/.build/checkouts/SwiftTerm/LICENSE" "$app_dir/Contents/Resources/SwiftTerm-LICENSE.txt"
 # Remove the obsolete development link if an earlier local build created it.
 if [ -L "$app_dir/$resource_bundle" ]; then
     rm "$app_dir/$resource_bundle"

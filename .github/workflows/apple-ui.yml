@@ -96,6 +96,10 @@ jobs:
         if: matrix.arch == 'arm64'
         run: swift scripts/ci-ui-smoke.swift build/VaydeAOS.app build/ci-logs/ui.log
 
+      - name: Smoke test resident background launch
+        if: matrix.arch == 'arm64'
+        run: swift scripts/ci-ui-smoke.swift build/VaydeAOS.app build/ci-logs/background.log --background
+
       - name: Record Intel UI coverage limit
         if: matrix.arch == 'x86_64'
         run: |

@@ -24,10 +24,16 @@
     <string>public.app-category.productivity</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAudioCaptureUsageDescription</key>
     <string>VaydeAOS analyzes system playback locally for the circular audio visualizer. Audio is not recorded or saved.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>VaydeAOS listens for Hey Vayde and transcribes your spoken request on this Mac. Disable listening from the Vayde Voice menu at any time.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>VaydeAOS transcribes voice requests on this Mac after Hey Vayde. Only the request text is sent to your selected AI provider.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>

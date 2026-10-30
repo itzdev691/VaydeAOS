@@ -5,7 +5,8 @@ import VaydeAOSCore
 @main
 struct VaydeAOSApp: App {
     @NSApplicationDelegateAdaptor(VaydeAOSAppDelegate.self) private var appDelegate
-    @StateObject private var session = ChatSession(legacyConsole: legacyConsoleState())
+    private var session: ChatSession { appDelegate.session }
+    private var voice: VoiceAssistant { appDelegate.voice }
     @State private var showingConnectionSettings = false
     @State private var startupComplete = false
     @AppStorage("startup.soundEnabled") private var startupSoundEnabled = true
@@ -13,16 +14,16 @@ struct VaydeAOSApp: App {
     var body: some Scene {
         Window("VaydeAOS", id: "chat") {
             StartupContainer(isComplete: $startupComplete) {
-                ChatView(session: session, showingConnectionSettings: $showingConnectionSettings)
+                ChatView(session: session, projectConsoles: appDelegate.projectConsoles,
+                         showingConnectionSettings: $showingConnectionSettings)
             }
+            .environmentObject(voice)
+            .modifier(BackgroundWindowBridge(controller: appDelegate.background))
             .frame(minWidth: 1080, minHeight: 780)
             .sheet(isPresented: $showingConnectionSettings) {
                 ConnectionSettingsView(session: session)
             }
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                session.saveDraft()
-                session.codex.shutdown()
-            }
+            .onChange(of: showingConnectionSettings) { voice.setInteractionBlocked($0) }
         }
         .defaultSize(width: 1460, height: 980)
         .windowResizability(.contentMinSize)
@@ -50,7 +51,18 @@ struct VaydeAOSApp: App {
                 .disabled(!startupComplete || session.isSending)
                 Divider()
                 Toggle("Startup Sound", isOn: $startupSoundEnabled)
+                Toggle("Listen for “Hey Vayde”", isOn: Binding(get: { voice.isEnabled }, set: voice.setEnabled))
             }
+        }
+        MenuBarExtra {
+            VoiceAssistantMenu(voice: voice, background: appDelegate.background)
+        } label: {
+            Console.image("vayde-mark", extension: "png")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 24, height: 24)
+                .accessibilityLabel("VaydeAOS")
         }
     }
 }
@@ -64,14 +76,43 @@ private func legacyConsoleState() -> WorkspaceConsoleState {
     return console
 }
 
+@MainActor
 final class VaydeAOSAppDelegate: NSObject, NSApplicationDelegate {
+    let session: ChatSession
+    let voice: VoiceAssistant
+    let background = BackgroundAppController()
+    let projectConsoles = ProjectConsoleRegistry()
+
+    override init() {
+        let session = ChatSession(legacyConsole: legacyConsoleState())
+        self.session = session
+        voice = VoiceAssistant(session: session, audio: MacVoiceAudio())
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        let loginLaunch = event?.eventID == kAEOpenApplication
+            && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        background.didLaunch(inBackground: loginLaunch || CommandLine.arguments.contains("--background"))
+        voice.onActivation = { [weak self] in self?.background.showWorkspace(openChat: true) }
+        if ProcessInfo.processInfo.environment["VAYDEAOS_DISABLE_VOICE"] != "1" { voice.start() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        background.showWorkspace()
+        return false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        voice.shutdown()
+        session.saveDraft()
+        projectConsoles.shutdown()
+        session.codex.shutdown()
     }
 }
 

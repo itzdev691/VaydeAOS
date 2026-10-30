@@ -11,6 +11,7 @@ struct AskVaydeBoundsKey: PreferenceKey {
 
 /// Repository, serial, build, and host observations share the workspace with chat and notes.
 struct ProjectConsoleView: View {
+    @Environment(\.workspaceWindowVisible) private var workspaceWindowVisible
     @ObservedObject var session: ChatSession
     @ObservedObject var telemetry: SystemTelemetry
     @ObservedObject var controller: ProjectConsoleController
@@ -97,7 +98,9 @@ struct ProjectConsoleView: View {
             if isStudentDB { controller.selectSource(session.workspaceConsole.studentDB.sourcePath) }
             await controller.refresh()
         }
-        .onReceive(refreshTicker) { _ in Task { await controller.refresh() } }
+        .onReceive(refreshTicker) { _ in
+            if workspaceWindowVisible { Task { await controller.refresh() } }
+        }
     }
 
     private var projectState: some View {
