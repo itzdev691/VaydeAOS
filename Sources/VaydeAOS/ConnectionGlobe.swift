@@ -1,16 +1,15 @@
 import SwiftUI
+import VaydeAOSCore
 
 /// Geographic backdrop and illustrative connections, independent of measured traffic.
 struct ConnectionGlobe: View {
     var isActive: Bool
-    @State private var yaw = 0.0
-    @State private var tilt = -0.19
+    @AppStorage("idle.networkWorldMap") private var isWorldMap = false
+    @State private var motion = ConnectionMotion(at: Date.timeIntervalSinceReferenceDate)
     @State private var zoom = 1.0
     @State private var spinning = true
-    @State private var dragging = false
+    @GestureState private var dragging = false
     @State private var lastDrag = CGSize.zero
-    @State private var spinOffset = 0.4
-    @State private var epoch = Date()
     @State private var selectedSite: Int?
     @GestureState private var magnification = 1.0
 
@@ -18,73 +17,107 @@ struct ConnectionGlobe: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        let moving = isActive && !reduceMotion && scenePhase == .active && spinning && !dragging
+        let moving = canAnimate
         GeometryReader { geometry in
-        TimelineView(.animation(minimumInterval: 1 / 24, paused: !moving)) { timeline in
+        TimelineView(.animation(minimumInterval: 1 / 60, paused: !moving)) { timeline in
             Canvas { context, size in
-                let rotation = yaw + spinOffset + (moving ? timeline.date.timeIntervalSince(epoch) * 0.055 : 0)
-                GlobeDrawing.draw(in: &context, size: size, rotation: rotation, tilt: tilt,
-                                  zoom: zoom * magnification, selectedSite: selectedSite)
+                let position = motion.position(at: timeline.date.timeIntervalSinceReferenceDate)
+                GlobeDrawing.draw(in: &context, size: size, rotation: position.rotation, tilt: position.tilt,
+                                  zoom: effectiveZoom, selectedSite: selectedSite, isWorldMap: isWorldMap)
             }
         }
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 3)
+            .updating($dragging) { _, state, _ in state = true }
             .onChanged { value in
-                dragging = true
-                yaw += Double(value.translation.width - lastDrag.width) * 0.008
-                tilt = min(1.2, max(-1.2, tilt + Double(value.translation.height - lastDrag.height) * 0.006))
+                let dx = Double(value.translation.width - lastDrag.width)
+                let dy = Double(value.translation.height - lastDrag.height)
+                let scale = dragScale(size: geometry.size)
+                // macOS gesture timestamps can use system uptime. Motion and
+                // TimelineView must share Date's reference clock.
+                motion.drag(rotation: dx * scale.width, tilt: dy * scale.height,
+                            at: Date.timeIntervalSinceReferenceDate)
                 lastDrag = value.translation
-            }.onEnded { _ in lastDrag = .zero; dragging = false })
+            }.onEnded { value in
+                let now = Date.timeIntervalSinceReferenceDate
+                let scale = dragScale(size: geometry.size)
+                motion.drag(rotation: (value.translation.width - lastDrag.width) * scale.width,
+                            tilt: (value.translation.height - lastDrag.height) * scale.height,
+                            at: now)
+                motion.endDrag(at: now)
+                clearDrag()
+            })
         .gesture(MagnificationGesture().updating($magnification) { value, state, _ in state = value }
             .onEnded { zoom = min(1.5, max(0.75, zoom * $0)) })
         .onTapGesture(count: 2) { reset() }
-        .onTapGesture { location in selectSite(at: location, size: geometry.size, moving: moving) }
+        .onTapGesture { location in selectSite(at: location, size: geometry.size) }
         .clipped()
         }
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 15) {
+                Button { isWorldMap.toggle() } label: {
+                    Image(systemName: isWorldMap ? "globe" : "map")
+                        .frame(width: 16, height: 16)
+                }
+                    .accessibilityLabel(isWorldMap ? "Switch to globe" : "Switch to world map")
+                    .help(isWorldMap ? "Switch to globe" : "Switch to world map")
                 Button { spinning.toggle() } label: { Image(systemName: spinning ? "pause" : "play") }
-                    .accessibilityLabel(spinning ? "Pause globe rotation" : "Resume globe rotation")
+                    .accessibilityLabel(spinning ? "Pause \(viewName) motion" : "Resume \(viewName) motion")
                 Button { zoom = max(0.75, zoom / 1.12) } label: { Image(systemName: "minus") }
-                    .accessibilityLabel("Zoom out globe")
+                    .accessibilityLabel("Zoom out \(viewName)")
                 Button { zoom = min(1.5, zoom * 1.12) } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("Zoom in globe")
-                Button { reset() } label: { Image(systemName: "scope") }.accessibilityLabel("Reset globe view")
+                    .accessibilityLabel("Zoom in \(viewName)")
+                Button { reset() } label: { Image(systemName: "scope") }.accessibilityLabel("Reset \(viewName) view")
             }.buttonStyle(.plain).font(Console.mono(11)).foregroundStyle(Console.blueBright)
                 .padding(12).background(Console.panel.opacity(0.9)).padding(8)
         }
         .onChange(of: moving) { active in
-            if !active { spinOffset += Date().timeIntervalSince(epoch) * 0.055 }
-            epoch = Date()
+            motion.setAdvancing(active, at: Date.timeIntervalSinceReferenceDate)
+        }
+        .onChange(of: dragging) { active in
+            if !active { motion.endDrag(at: Date.timeIntervalSinceReferenceDate); clearDrag() }
+        }
+        .onAppear { motion.setAdvancing(moving, at: Date.timeIntervalSinceReferenceDate) }
+        .onDisappear {
+            motion.endDrag(at: Date.timeIntervalSinceReferenceDate)
+            motion.setAdvancing(false, at: Date.timeIntervalSinceReferenceDate)
+            clearDrag()
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Interactive globe with illustrative connections")
-        .help("Drag to rotate and tilt. Pinch or use +/- to zoom. Click a connection node to highlight its links. Double-click or use reset to restore the view.")
+        .accessibilityLabel("Interactive \(viewName) with illustrative connections")
+        .help("\(isWorldMap ? "Drag to pan the map." : "Drag to rotate and tilt.") Pinch or use +/- to zoom. Click a connection node to highlight its links. Double-click or use reset to restore the view.")
     }
 
-    private func selectSite(at location: CGPoint, size: CGSize, moving: Bool) {
-        let rotation: Double = yaw + spinOffset + (moving ? Date().timeIntervalSince(epoch) * 0.055 : 0)
-        let radius: Double = Double(min(size.width, size.height)) * 0.395 * zoom
-        let centerX: Double = Double(size.width) / 2, centerY: Double = Double(size.height) / 2
-        let sinTilt: Double = sin(tilt), cosTilt: Double = cos(tilt)
-        var nearest: (Int, Double)?
-        for (index, site) in GlobeDrawing.sites.enumerated() {
-            let a: Double = site.0 * Double.pi / 180 + rotation
-            let b: Double = site.1 * Double.pi / 180
-            let x: Double = cos(b) * sin(a), y: Double = sin(b), z: Double = cos(b) * cos(a)
-            let depth: Double = y * sinTilt + z * cosTilt
-            guard depth > 0 else { continue }
-            let px: Double = centerX + x * radius
-            let py: Double = centerY - (y * cosTilt - z * sinTilt) * radius
-            let distance: Double = hypot(px - Double(location.x), py - Double(location.y))
-            if distance < 18 && distance < (nearest?.1 ?? .infinity) { nearest = (index, distance) }
-        }
-        selectedSite = nearest?.0 == selectedSite ? nil : nearest?.0
+    private var viewName: String { isWorldMap ? "world map" : "globe" }
+    private var canAnimate: Bool { isActive && !reduceMotion && scenePhase == .active && spinning }
+    private var effectiveZoom: Double { min(1.5, max(0.75, zoom * magnification)) }
+
+    private func projection(size: CGSize) -> ConnectionProjection {
+        let position = motion.position(at: Date.timeIntervalSinceReferenceDate)
+        return ConnectionProjection(isWorldMap: isWorldMap, size: size,
+                                    rotation: position.rotation, tilt: position.tilt, zoom: effectiveZoom)
+    }
+
+    private func dragScale(size: CGSize) -> CGSize {
+        guard isWorldMap else { return CGSize(width: 0.006, height: 0.0045) }
+        let bounds = projection(size: size).mapBounds
+        return CGSize(width: 2 * .pi / max(1, bounds.width), height: .pi / max(1, bounds.height))
+    }
+
+    private func clearDrag() {
+        lastDrag = .zero
+    }
+
+    private func selectSite(at location: CGPoint, size: CGSize) {
+        let nearest = projection(size: size).nearestSite(to: location, sites: GlobeDrawing.sites)
+        selectedSite = nearest == selectedSite ? nil : nearest
     }
 
     private func reset() {
-        yaw = 0; tilt = -0.19; zoom = 1; selectedSite = nil
-        spinOffset = 0.4; epoch = Date(); spinning = true
+        zoom = 1; selectedSite = nil; spinning = true
+        motion = ConnectionMotion(at: Date.timeIntervalSinceReferenceDate)
+        motion.setAdvancing(canAnimate, at: Date.timeIntervalSinceReferenceDate)
+        clearDrag()
     }
 }
 
@@ -98,28 +131,45 @@ private enum GlobeDrawing {
     }()
 
     static func draw(in context: inout GraphicsContext, size: CGSize, rotation: Double,
-                     tilt: Double, zoom: Double, selectedSite: Int?) {
-        let radius: Double = Double(min(size.width, size.height)) * 0.395 * zoom
+                     tilt: Double, zoom: Double, selectedSite: Int?, isWorldMap: Bool) {
+        let projection = ConnectionProjection(isWorldMap: isWorldMap, size: size, rotation: rotation, tilt: tilt, zoom: zoom)
+        let radius = projection.radius
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let rim = Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+        let rim = isWorldMap ? Path(projection.mapBounds) : Path(ellipseIn: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
         context.fill(rim, with: .radialGradient(Gradient(colors: [Console.blue.opacity(0.09), .clear]),
                                                center: center, startRadius: 0, endRadius: radius))
-        context.stroke(rim, with: .color(Console.blueBright.opacity(0.85)), lineWidth: 0.8)
+        if !isWorldMap {
+            context.stroke(rim, with: .color(Console.blueBright.opacity(0.85)), lineWidth: 0.8)
+        }
+        var geography = context
+        if isWorldMap { geography.clip(to: rim) }
         func project(_ lon: Double, _ lat: Double, lift: Double = 1) -> (CGPoint, Double) {
-            let a = lon * .pi / 180 + rotation, b = lat * .pi / 180
-            let x = cos(b) * sin(a), y = sin(b), z = cos(b) * cos(a)
-            return (CGPoint(x: center.x + x * radius * lift,
-                            y: center.y - (y * cos(tilt) - z * sin(tilt)) * radius * lift),
-                    y * sin(tilt) + z * cos(tilt))
+            projection.project(longitude: lon, latitude: lat, lift: lift)
+        }
+        func append(_ point: CGPoint, to path: inout Path, previous: CGPoint?) {
+            guard let previous else { path.move(to: point); return }
+            let bounds = projection.mapBounds
+            if isWorldMap && abs(point.x - previous.x) > bounds.width / 2 {
+                // Split at the map seam instead of drawing a line across the world.
+                let exitsRight = point.x < previous.x
+                let edge = exitsRight ? bounds.maxX : bounds.minX
+                let wrappedX = point.x + (exitsRight ? bounds.width : -bounds.width)
+                let fraction = (edge - previous.x) / (wrappedX - previous.x)
+                let y = previous.y + (point.y - previous.y) * fraction
+                path.addLine(to: CGPoint(x: edge, y: y))
+                path.move(to: CGPoint(x: exitsRight ? bounds.minX : bounds.maxX, y: y))
+            }
+            path.addLine(to: point)
         }
         func line(_ coordinates: [[Double]], opacity: Double, width: Double) {
-            var path = Path(); var penDown = false
+            var path = Path(); var previous: CGPoint?
             for pair in coordinates where pair.count >= 2 {
                 let (point, depth) = project(pair[0], pair[1])
-                if depth < 0 { penDown = false; continue }
-                if penDown { path.addLine(to: point) } else { path.move(to: point); penDown = true }
+                if depth < 0 { previous = nil; continue }
+                append(point, to: &path, previous: previous)
+                previous = point
             }
-            context.stroke(path, with: .color(Console.blueBright.opacity(opacity)), lineWidth: width)
+            geography.stroke(path, with: .color(Console.blueBright.opacity(opacity)), lineWidth: width)
         }
         for latitude in stride(from: -60.0, through: 60, by: 30) {
             line(stride(from: -180.0, through: 180, by: 3).map { [$0, latitude] }, opacity: 0.28, width: 0.6)
@@ -138,32 +188,34 @@ private enum GlobeDrawing {
             }
             let u = vector(a), v = vector(b)
             let omega = acos(min(1, max(-1, u.x * v.x + u.y * v.y + u.z * v.z)))
-            var path = Path(); var down = false
+            var path = Path(); var previous: CGPoint?
             for step in 0...60 {
                 let t = Double(step) / 60
                 let p = (u * sin((1-t)*omega) + v * sin(t*omega)) / sin(omega)
                 let lon = atan2(p.y, p.x) * 180 / .pi, lat = asin(p.z) * 180 / .pi
                 let lift: Double = 1.0 + sin(t * Double.pi) * 0.09
                 let (point, depth) = project(lon, lat, lift: lift)
-                if depth < -0.03 { down = false; continue }
-                if down { path.addLine(to: point) } else { path.move(to: point); down = true }
+                if depth < -0.03 { previous = nil; continue }
+                append(point, to: &path, previous: previous)
+                previous = point
             }
             let highlighted = selectedSite == index || selectedSite == (index + 3) % sites.count
-            context.stroke(path, with: .color(highlighted ? Console.white.opacity(0.95) : Console.blue.opacity(selectedSite == nil ? 0.7 : 0.22)),
+            geography.stroke(path, with: .color(highlighted ? Console.white.opacity(0.95) : Console.blue.opacity(selectedSite == nil ? 0.7 : 0.22)),
                            lineWidth: highlighted ? 1.6 : 0.9)
             let (point, depth) = project(a.0, a.1)
             if depth > 0 {
                 if selectedSite == index {
-                    context.fill(Path(ellipseIn: CGRect(x: point.x-13, y: point.y-13, width: 26, height: 26)),
+                    geography.fill(Path(ellipseIn: CGRect(x: point.x-13, y: point.y-13, width: 26, height: 26)),
                                  with: .color(Console.blueBright.opacity(0.25)))
                 }
                 for (r, opacity) in [(8.0, 0.3), (4.5, 0.7)] {
-                    context.stroke(Path(ellipseIn: CGRect(x: point.x-r, y: point.y-r, width: r*2, height: r*2)),
+                    geography.stroke(Path(ellipseIn: CGRect(x: point.x-r, y: point.y-r, width: r*2, height: r*2)),
                                    with: .color(Console.blueBright.opacity(opacity)), lineWidth: 0.7)
                 }
-                context.fill(Path(ellipseIn: CGRect(x: point.x-2, y: point.y-2, width: 4, height: 4)), with: .color(Console.blueBright))
+                geography.fill(Path(ellipseIn: CGRect(x: point.x-2, y: point.y-2, width: 4, height: 4)), with: .color(Console.blueBright))
             }
         }
+        guard !isWorldMap else { return }
         var ticks = Path()
         for i in 0..<120 {
             let angle = Double(i) / 120 * .pi * 2
