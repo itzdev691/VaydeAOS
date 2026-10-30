@@ -33,6 +33,8 @@ public struct SavedChat: Identifiable, Codable, Equatable, Sendable {
     public var interruptedTurns: [InterruptedTurn] = []
     public var draft = ""
     public var updatedAt = Date()
+    /// The channel can close without ending this saved conversation.
+    public var channelClosedAt: Date?
     /// Nil only while importing the original shared connection settings.
     public var configuration: ConnectionSettings?
 

@@ -169,6 +169,87 @@ final class ChatSessionTests {
     }
 
     @Test
+    func testChannelReopenTimeoutPreservesAndArchivesDrafts() throws {
+        let session = makeSession(client: ControlledChatClient())
+        let originalID = session.selectedChatID
+        let closed = Date(timeIntervalSinceReferenceDate: 10_000)
+        let timeout = ChatSession.chatReopenTimeout
+        session.draft = "Keep this unfinished prompt"
+        session.closeChatChannel(originalID, at: closed)
+        session.prepareChatForOpening(at: closed.addingTimeInterval(timeout - 1))
+        #expect(session.selectedChatID == originalID)
+        #expect(session.draft == "Keep this unfinished prompt")
+        #expect(session.chats.count == 1)
+
+        session.closeChatChannel(originalID, at: closed.addingTimeInterval(timeout))
+        let relaunched = makeSession(client: ControlledChatClient())
+        relaunched.prepareChatForOpening(at: closed.addingTimeInterval(2 * timeout))
+        #expect(relaunched.selectedChatID != originalID)
+        #expect(relaunched.draft.isEmpty)
+        #expect(relaunched.chats.count == 2)
+        #expect(relaunched.chats.first { $0.id == originalID }?.draft == "Keep this unfinished prompt")
+        #expect(makeSession(client: ControlledChatClient()).selectedChatID == relaunched.selectedChatID)
+    }
+
+    @Test
+    func testExplicitSavedChatResumeBypassesTimeoutAndEmptyChatsAreReused() {
+        let session = makeSession(client: ControlledChatClient())
+        let originalID = session.selectedChatID
+        let closed = Date(timeIntervalSinceReferenceDate: 10_000)
+        let later = closed.addingTimeInterval(ChatSession.chatReopenTimeout * 2)
+        session.closeChatChannel(originalID, at: closed)
+        session.prepareChatForOpening(at: later)
+        #expect(session.selectedChatID == originalID)
+        #expect(session.chats.count == 1)
+
+        session.draft = "Resume this saved chat"
+        session.closeChatChannel(originalID, at: closed)
+        session.prepareChatForOpening(resuming: true, at: later)
+        #expect(session.selectedChatID == originalID)
+        #expect(session.draft == "Resume this saved chat")
+    }
+
+    @Test
+    func testChannelTimeoutIsScopedToTheSelectedWorkspace() {
+        let session = makeSession(client: ControlledChatClient())
+        let originalWorkspace = session.selectedWorkspaceID
+        let originalChat = session.selectedChatID
+        let closed = Date(timeIntervalSinceReferenceDate: 10_000)
+        session.draft = "First workspace draft"
+        session.closeChatChannel(originalChat, at: closed)
+        session.createWorkspace(named: "Second")
+        let secondChat = session.selectedChatID
+        session.prepareChatForOpening(at: closed.addingTimeInterval(ChatSession.chatReopenTimeout))
+        #expect(session.selectedChatID == secondChat)
+        session.selectWorkspace(originalWorkspace)
+        session.prepareChatForOpening(at: closed.addingTimeInterval(ChatSession.chatReopenTimeout))
+        #expect(session.selectedChatID != originalChat)
+        #expect(session.selectedWorkspaceID == originalWorkspace)
+        #expect(session.chats.first { $0.id == originalChat }?.draft == "First workspace draft")
+        #expect(session.chats.contains { $0.id == secondChat })
+    }
+
+    @Test
+    func testChannelTimeoutDoesNotInterruptRunningRequests() async throws {
+        let client = ControlledChatClient()
+        let session = makeSession(client: client)
+        let originalID = session.selectedChatID
+        let closed = Date(timeIntervalSinceReferenceDate: 10_000)
+        session.draft = "Finish this request"
+        session.send()
+        let task = try #require(session.sendTask)
+        try await waitForRequests(1, client: client)
+        session.closeChatChannel(originalID, at: closed)
+        session.prepareChatForOpening(at: closed.addingTimeInterval(ChatSession.chatReopenTimeout))
+        #expect(session.selectedChatID == originalID)
+        #expect(session.isSending)
+        #expect(session.pendingMessage?.content == "Finish this request")
+        await client.succeed(at: 0, with: "Completed")
+        await task.value
+        #expect(session.messages.map(\.content) == ["Finish this request", "Completed"])
+    }
+
+    @Test
     func testNewChatCancelsPendingWorkAndPreservesPreviousChat() async throws {
         let store = LocalStore(directory: directory)
         try store.saveMessages([ChatMessage(role: .user, content: "Old"), ChatMessage(role: .assistant, content: "Answer")])

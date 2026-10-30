@@ -337,6 +337,28 @@ public final class ChatSession: ObservableObject {
 
     public var canOrganizeChats: Bool { libraryLoadIssue == nil && !isSending && !codex.isRunning && !codex.isChecking }
 
+    public static let chatReopenTimeout: TimeInterval = 30 * 60
+
+    /// Generic channel entry expires after time away; explicit saved-chat selection always resumes.
+    public func prepareChatForOpening(resuming: Bool = false, at date: Date = Date()) {
+        guard let chat = library.chats.first(where: { $0.id == selectedChatID }) else { return }
+        let hasContent = !messages.isEmpty || !draft.isEmpty || !interruptedTurns.isEmpty
+        if !resuming, canOrganizeChats, hasContent,
+           date.timeIntervalSince(chat.channelClosedAt ?? chat.updatedAt) >= Self.chatReopenTimeout {
+            newChat()
+        }
+        guard let index = library.chats.firstIndex(where: { $0.id == selectedChatID }) else { return }
+        library.chats[index].channelClosedAt = nil
+        saveLibrary()
+    }
+
+    public func closeChatChannel(_ chatID: UUID, at date: Date = Date()) {
+        guard let index = library.chats.firstIndex(where: { $0.id == chatID }),
+              library.chats[index].channelClosedAt == nil else { return }
+        library.chats[index].channelClosedAt = date
+        saveLibrary()
+    }
+
     public func newChat() {
         // New Chat preserves the old transcript. Stop a compatible request before archiving it.
         guard libraryLoadIssue == nil, !codex.isRunning, !codex.isChecking else { return }

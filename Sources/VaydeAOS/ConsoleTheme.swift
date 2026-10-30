@@ -33,6 +33,8 @@ enum Console {
     }
     static let background = hex(0x050b18)
     static let panel = hex(0x09162e)
+    static let chatBackground = hex(0x08121f)
+    static let chatComposer = hex(0x0b1929)
     static let raised = hex(0x0d2852)
     static let blue = hex(0x007bfd)
     static let border = hex(0x1c4380)

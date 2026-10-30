@@ -14,6 +14,7 @@ struct ChatView: View {
     @FocusState private var composerFocused: Bool
     @State private var chatPresented = false
     @State private var channelWorkspaceID: UUID?
+    @State private var channelChatID: UUID?
     @Namespace private var workspacePanelAnimation
     private var workspacePanelPresented: Bool { session.workspaceConsole.panelExpanded && !chatPresented }
     private var chatSidebarVisible: Bool { session.workspaceConsole.sidebarVisible }
@@ -32,7 +33,7 @@ struct ChatView: View {
                 }
                 HStack(alignment: .top, spacing: 12) {
                     if chatSidebarVisible {
-                        ChatSidebar(session: session, openChat: { openChat() },
+                        ChatSidebar(session: session, openChat: { openChat(resuming: true) },
                                     openConsole: { openConsole() }, isChatOpen: chatPresented)
                             .frame(width: 208)
                             .workspaceBoot(stage: 2, label: "WORKSPACES")
@@ -150,27 +151,32 @@ struct ChatView: View {
             composerFocused = false
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) { idlePresented = true }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .vaydeOpenChat)) { _ in openChat() }
+        .onReceive(NotificationCenter.default.publisher(for: .vaydeOpenChat)) { _ in openChat(resuming: true) }
         .onAppear { telemetry.start() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            closeChatChannel()
             projectConsoles.shutdown()
         }
-        .onDisappear { telemetry.stop() }
+        .onDisappear { closeChatChannel(); telemetry.stop() }
         .onChange(of: scenePhase) { phase in
             if phase == .background { telemetry.stop() } else { telemetry.start() }
             if phase == .active { _ = registerInteraction() }
         }
         .onChange(of: session.selectedWorkspaceID) { _ in
             if channelWorkspaceID != session.selectedWorkspaceID {
+                closeChatChannel()
                 composerFocused = false
                 chatPresented = false
             }
             _ = registerInteraction()
         }
+        .onChange(of: session.selectedChatID) { id in
+            if chatPresented && channelWorkspaceID == session.selectedWorkspaceID { channelChatID = id }
+        }
         .onChange(of: session.isSending) { sending in
             _ = registerInteraction()
             record(sending ? "Model request started" : "Model request finished")
-            if !sending { openChat() }
+            if !sending { openChat(resuming: true) }
         }
         .onChange(of: session.errorMessage) { error in
             if error != nil, channelWorkspaceID == session.selectedWorkspaceID {
@@ -238,8 +244,12 @@ struct ChatView: View {
         session.updateWorkspaceConsole { $0.panelExpanded = false }
     }
 
-    private func openChat(prompt: String? = nil) {
+    private func openChat(prompt: String? = nil, resuming: Bool = false) {
+        if !chatPresented || channelWorkspaceID != session.selectedWorkspaceID || resuming {
+            session.prepareChatForOpening(resuming: resuming)
+        }
         channelWorkspaceID = session.selectedWorkspaceID
+        channelChatID = session.selectedChatID
         if let prompt {
             session.draft = session.draft.isEmpty ? prompt : session.draft + "\n\n" + prompt
         }
@@ -253,6 +263,7 @@ struct ChatView: View {
     }
 
     private func openConsole() {
+        closeChatChannel()
         _ = registerInteraction()
         channelWorkspaceID = nil
         composerFocused = false
@@ -261,6 +272,11 @@ struct ChatView: View {
             chatPresented = false
         }
         record("Workspace console opened")
+    }
+
+    private func closeChatChannel() {
+        if let channelChatID { session.closeChatChannel(channelChatID) }
+        channelChatID = nil
     }
 
     private func record(_ title: String) {
@@ -354,11 +370,17 @@ struct ChatView: View {
                 .background(Console.background.opacity(0.45))
                 Group {
                     if session.messages.isEmpty && session.pendingMessage == nil && session.interruptedTurns.isEmpty {
-                        ScrollView { emptyConversation }
+                        GeometryReader { geometry in
+                            ScrollView {
+                                emptyConversation
+                                    .frame(minHeight: geometry.size.height)
+                            }
+                        }
                     } else { transcript }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 composer
             }
+            .background(Console.chatBackground)
         }
     }
 
@@ -380,23 +402,32 @@ struct ChatView: View {
             }.font(Console.mono(9)).foregroundStyle(Console.blue)
             conversationPanel
         }
-        .background(Console.background)
+        .background(Console.chatBackground)
     }
 
     private var emptyConversation: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text(">").foregroundStyle(Console.blue)
-                Text("Intent becomes action.").foregroundStyle(Console.text)
-            }.font(Console.mono(20, weight: .light))
+        VStack(spacing: 14) {
+            Text("Ask Vayde")
+                .font(.system(size: 30, weight: .light, design: .rounded))
+                .foregroundStyle(Console.text)
+            Text("Intent becomes action.")
+                .font(.system(size: 16, weight: .medium)).foregroundStyle(Console.text)
             Text("A direct line to your model. Start with a question,\nan idea, or the next thing you want to build.")
-                .font(Console.mono(11)).foregroundStyle(Console.muted).lineSpacing(5)
-            HStack(spacing: 7) {
-                promptButton("Explore an idea", prompt: "Help me explore an idea. Start by asking what I want to build.")
-                promptButton("Break down a task", prompt: "Help me break a task into clear, practical steps.")
+                .font(.system(size: 13)).foregroundStyle(Console.muted).lineSpacing(5)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 7) { conversationPrompts }
+                VStack(spacing: 7) { conversationPrompts }
             }.padding(.top, 5)
         }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(24)
+        .multilineTextAlignment(.center)
+        .padding(24)
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var conversationPrompts: some View {
+        promptButton("Explore an idea", prompt: "Help me explore an idea. Start by asking what I want to build.")
+        promptButton("Break down a task", prompt: "Help me break a task into clear, practical steps.")
     }
 
     private func promptButton(_ title: String, prompt: String) -> some View {
@@ -491,7 +522,7 @@ struct ChatView: View {
                 }
             }.font(Console.mono(9))
         }
-        .padding(12).background(Console.background.opacity(0.7))
+        .padding(12).background(Console.chatComposer)
         .overlay(Rectangle().strokeBorder(composerFocused ? Console.red.opacity(0.55) : Console.line, lineWidth: 1))
         .padding(12)
     }
